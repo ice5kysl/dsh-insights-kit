@@ -191,6 +191,7 @@ const GOOD_PKG = {
   license: 'MIT',
   keywords: ['dsh', 'deepseek-harness', 'cordis', 'plugin'],
   files: ['lib', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE'],
+  engines: { dsh: '^0.1.1' },
   exports: { '.': { default: './lib/index.js' }, './client': { default: './lib/client.js' } },
   dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } },
 }
@@ -248,6 +249,24 @@ writeTree(driftDir, {
   'tests/d.test.mjs': 'export {}\n',
   '.github/workflows/ci.yml': 'name: ci\n',
   'src/index.ts': 'export const x = 1\n',
+})
+
+// Identical to good-plugin but without engines.dsh — isolates the zero-weight
+// hint: the score must stay 100/S and the CLI exit code 0.
+const { engines: _omitEngines, ...GOOD_NO_ENGINES } = GOOD_PKG
+const hintDir = join(fixtureRoot, 'hint-plugin')
+writeTree(hintDir, {
+  'package.json': JSON.stringify(GOOD_NO_ENGINES, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: good\n      name: good-pkg\n',
+  'lib/index.js': 'export const name = "good"\n',
+  'lib/client.js': 'window.__ModuleLoader__ = window.__ModuleLoader__ || {}\n',
+  'README.md': `# good-pkg\n\n${'A well-documented fixture plugin. '.repeat(20)}\n`,
+  'README.zh-CN.md': '# good-pkg\n\n中文文档。\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/good.test.mjs': 'import test from "node:test"\ntest("ok", () => {})\n',
+  '.github/workflows/ci.yml': 'name: ci\non: [push]\n',
+  'src/index.ts': 'export function apply(): void {\n  element.textContent = "safe"\n}\n',
 })
 
 // ── plugin under test (fake ctx.webServer contract) ─────────────────────────
@@ -530,10 +549,22 @@ await check('selfcheck: well-built plugin scores S/100 with no drops', async () 
   const r = await runSelfcheck(goodDir)
   if (r.score !== 100 || r.grade !== 'S') throw new Error(`score ${r.score} grade ${r.grade}: ${JSON.stringify(r.drops)}`)
   if (r.drops.length !== 0) throw new Error(`unexpected drops: ${r.drops.map((d) => d.code)}`)
+  if (r.hints.length !== 0) throw new Error(`unexpected hints: ${r.hints.map((h) => h.code)}`)
   if (r.pkgName !== 'good-pkg' || r.version !== '1.0.0') throw new Error('pkg fields wrong')
   if (r.npm?.published !== true || r.npm.latest !== '1.0.0') throw new Error('npm report wrong')
   if (r.scan.totalHits !== 0) throw new Error(`scan should be clean: ${JSON.stringify(r.scan.hits)}`)
   if (!Array.isArray(r.uncovered) || r.uncovered.length === 0) throw new Error('uncovered list missing')
+})
+
+await check('selfcheck: missing engines.dsh yields a zero-weight hint', async () => {
+  const r = await runSelfcheck(hintDir)
+  if (r.score !== 100 || r.grade !== 'S' || r.drops.length !== 0) {
+    throw new Error(`hint must not affect the score: score ${r.score} drops ${r.drops.map((d) => d.code)}`)
+  }
+  if (r.hints.length !== 1 || r.hints[0].code !== 'manifest.no-engines-dsh') {
+    throw new Error(`hints wrong: ${JSON.stringify(r.hints)}`)
+  }
+  if (!r.hints[0].zh.includes('engines.dsh') || !r.hints[0].en.includes('engines.dsh')) throw new Error('hint text missing')
 })
 
 await check('selfcheck: skeletal plugin collects the expected rule codes', async () => {
@@ -552,6 +583,8 @@ await check('selfcheck: skeletal plugin collects the expected rule codes', async
   const readme = r.drops.find((d) => d.code === 'docs.no-readme')
   if (readme.sev !== 'fail' || !readme.fix.zh) throw new Error('fail sev or fix guidance missing')
   if (r.npm?.published !== false) throw new Error('npm should be unpublished')
+  // bad-pkg declares no engines.dsh → advisory hint, score untouched
+  if (!r.hints.some((h) => h.code === 'manifest.no-engines-dsh')) throw new Error('engines.dsh hint missing')
 })
 
 await check('selfcheck: write-surface scan flags fs/child-process/http-write', async () => {
@@ -612,6 +645,15 @@ await check('cli: selfcheck good fixture exits 0 with S/100 text report', async 
   if (code !== 0) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
   if (!/100\/100/.test(out) || !/等级 S|Grade S/.test(out)) throw new Error(`unexpected output: ${out.slice(0, 300)}`)
   if (!out.includes('good-pkg@1.0.0')) throw new Error('pkg line missing')
+  if (out.includes('manifest.no-engines-dsh')) throw new Error('good fixture must not show the engines.dsh hint')
+})
+
+await check('cli: engines.dsh hint prints but keeps exit 0', async () => {
+  const { code, out } = runCli(['selfcheck', hintDir])
+  if (code !== 0) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
+  if (!out.includes('manifest.no-engines-dsh')) throw new Error('hint missing from output')
+  if (!/提示|Hints/.test(out)) throw new Error('hint section header missing')
+  if (!/100\/100/.test(out)) throw new Error('hint must not change the score')
 })
 
 await check('cli: selfcheck bad fixture exits 1 with grouped deductions', async () => {

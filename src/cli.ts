@@ -142,6 +142,15 @@ function printReport(report: SelfcheckReport, lang: Lang): void {
       }
     }
   }
+
+  // Advisory hints: zero weight — listed after the deductions, never scored.
+  if (report.hints.length > 0) {
+    out.push('')
+    out.push(t('提示（不计分）：', 'Hints (not scored):'))
+    for (const hint of report.hints) {
+      out.push(`  ${hint.code} — ${t(hint.zh, hint.en)}`)
+    }
+  }
   out.push('')
 
   const scan = report.scan

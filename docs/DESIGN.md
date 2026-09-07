@@ -96,9 +96,12 @@ The author self-check is a **CLI**, not a panel section:
   `dangerouslySetInnerHTML`. Informational only — never affects the score.
 - **CLI output**: text mode prints score + grade, deductions grouped by
   category with fix text (language from `--lang`, default `$LANG` zh* → 中文),
-  the scan summary, and the uncovered-rule codes; `--json` prints the full
-  report. Exit code is **1 when any fail-tier deduction exists**, else 0 —
-  usable as a CI pre-publish gate.
+  zero-weight advisory **hints** (`hints: [{code, zh, en}]` — currently
+  `manifest.no-engines-dsh` when no `engines.dsh` range is declared; never
+  scored, never affecting the exit code), the scan summary, and the
+  uncovered-rule codes; `--json` prints the full report. Exit code is **1
+  when any fail-tier deduction exists**, else 0 — usable as a CI pre-publish
+  gate.
 
 ## Caching (`src/host/upstream.ts`)
 

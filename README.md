@@ -24,6 +24,8 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 
 It prints the score + grade, deductions grouped by category **with per-item fix guidance**, a **read-only surface scan** summary (fs writes / child processes / HTTP write verbs / sanitization refs), and **npm consistency** (published / latest vs local version / release staleness; registry base overridable via `DSH_INSIGHTS_NPM_REGISTRY`). Exit code is **1 when any fail-tier deduction is present** (e.g. missing README), otherwise 0 — usable as a CI pre-publish gate; 2 on usage/path errors. Read-only — it never modifies the directory.
 
+The report may also carry **zero-weight hints** (never scored, never affecting the exit code) — currently `manifest.no-engines-dsh` when the plugin does not declare an `"engines": {"dsh": "^x.y.z"}` range (the dsh compatibility signal the audit panel and `compat.json` display).
+
 ## Why host-side routes are needed (design notes)
 
 The browser face never talks to dsh-insights.com directly. All data flows through the official **`ctx.webServer.register`** route seam (`dsh-host-webserver`), which keeps the dsh web server's loopback trust posture as the only network boundary:

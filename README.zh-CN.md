@@ -24,6 +24,8 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 
 输出分数 + 等级、**逐条带「怎么修」指引**的分类扣分明细、**只读面安全扫描**摘要（fs 写 / 子进程 / HTTP 写动词 / 消毒引用）与 **npm 一致性**（是否发布 / latest 与本地 version 是否脱节 / 发布是否陈旧；registry 可用 `DSH_INSIGHTS_NPM_REGISTRY` 覆盖）。**存在 fail 档扣分时退出码为 1**，否则 0——可直接作为 CI 的发布前门禁；用法/路径错误退出码为 2。全程只读，不修改目录。
 
+报告中还可能带**零权重提示**（不计分、不影响退出码）——目前是 `manifest.no-engines-dsh`：插件未声明 `"engines": {"dsh": "^x.y.z"}` 兼容范围时给出（该声明正是体检面板与 `compat.json` 展示的 dsh 兼容信号）。
+
 ## 为什么需要 host 面路由（设计说明）
 
 浏览器面从不直连 dsh-insights.com。所有数据走官方 **`ctx.webServer.register`** 路由缝（`dsh-host-webserver`），让 dsh web server 的回环信任边界成为唯一的网络边界：

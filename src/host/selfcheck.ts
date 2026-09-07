@@ -72,6 +72,11 @@ export interface SelfcheckReport {
   score: number
   grade: string
   drops: SelfcheckDrop[]
+  /**
+   * Zero-weight advisory hints (bilingual): things worth improving that are
+   * NOT scored — never affect score/grade or the CLI exit code.
+   */
+  hints: Array<{ code: string; zh: string; en: string }>
   /** health-v5 rules that need GitHub/git metadata and cannot run locally. */
   uncovered: Array<{ code: string; reason: { zh: string; en: string } }>
   scan: ScanReport
@@ -232,6 +237,7 @@ interface PkgShape {
   license?: string
   keywords?: string[]
   files?: string[]
+  engines?: Record<string, unknown>
   exports?: Record<string, unknown>
   dsh?: { bundle?: { patch?: string }; client?: { platform?: string } }
 }
@@ -299,6 +305,7 @@ export async function runSelfcheck(rawDir: string, options: SelfcheckOptions = {
   }
 
   const drops: SelfcheckDrop[] = []
+  const hints: SelfcheckReport['hints'] = []
 
   // ── manifest ──
   const patchRel = pkg.dsh?.bundle?.patch
@@ -317,6 +324,16 @@ export async function runSelfcheck(rawDir: string, options: SelfcheckOptions = {
   }
   if (!existsSync(join(dir, 'lib', 'index.js')) || !existsSync(join(dir, 'lib', 'client.js'))) {
     drops.push(drop('selfcheck.lib-missing', 'warn', 'lib/index.js 或 lib/client.js 缺失（未构建）', 'lib/index.js or lib/client.js missing (not built)'))
+  }
+
+  // ── zero-weight hints (advisory only — never scored) ──
+  const enginesDsh = pkg.engines?.dsh
+  if (typeof enginesDsh !== 'string' || enginesDsh.trim() === '') {
+    hints.push({
+      code: 'manifest.no-engines-dsh',
+      zh: '未声明 engines.dsh——dsh 版本兼容无从判定；建议加 "engines": {"dsh": "^0.1.1"}（插件声明兼容的 dsh 版本范围；体检面板与 compat.json 会展示）。',
+      en: 'engines.dsh is not declared — dsh compatibility cannot be determined; consider adding "engines": {"dsh": "^0.1.1"} (the dsh version range this plugin supports; the audit panel and compat.json display it).',
+    })
   }
 
   // ── docs ──
@@ -384,6 +401,7 @@ export async function runSelfcheck(rawDir: string, options: SelfcheckOptions = {
     score,
     grade: gradeOf(score),
     drops,
+    hints,
     uncovered: UNCOVERED,
     scan: scanSurface(dir),
     npm,
