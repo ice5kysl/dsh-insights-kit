@@ -168,6 +168,44 @@ export async function fetchAudit(
   return getJson(`audit?npm=${encodeURIComponent(names.join(','))}`)
 }
 
+// ── author self-check (/dsh-insights/selfcheck) ──────────────────────────────
+
+export interface SelfcheckDrop {
+  code: string
+  sev: DropSeverity
+  label: { zh: string; en: string }
+  fix: { zh: string; en: string }
+}
+
+export interface SelfcheckReport {
+  dir: string
+  pkgName: string | null
+  version: string | null
+  score: number
+  grade: string
+  drops: SelfcheckDrop[]
+  uncovered: Array<{ code: string; reason: { zh: string; en: string } }>
+  scan: {
+    srcFiles: number
+    sanitizedRefs: number
+    dangerouslySetInnerHTML: boolean
+    hits: Array<{ file: string; kind: string; match: string }>
+    totalHits: number
+  }
+  npm: {
+    published: boolean
+    latest?: string | null
+    versions?: number
+    latestTime?: string | null
+    error?: string
+  } | null
+}
+
+/** Run the author self-check on a local plugin directory (absolute path). */
+export async function fetchSelfcheck(dir: string): Promise<{ report: SelfcheckReport }> {
+  return getJson(`selfcheck?dir=${encodeURIComponent(dir)}`)
+}
+
 /**
  * Parse the「查验」input into `owner/repo`. Accepts a bare full name or a
  * GitHub URL in any common shape (https/http, with or without www, trailing

@@ -36,6 +36,7 @@ import {
   fetchDynamics,
   fetchPlugin,
   fetchScenarios,
+  fetchSelfcheck,
   parseRepoInput,
   type DynamicsDoc,
   type DropSeverity,
@@ -43,12 +44,13 @@ import {
   type ReleaseRow,
   type Scenario,
   type ScenariosDoc,
+  type SelfcheckReport,
 } from './api.ts'
 import { getInventoryLister, installedPluginNames } from './inventory.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
 
-type Section = 'audit' | 'check' | 'scenarios'
+type Section = 'audit' | 'check' | 'scenarios' | 'selfcheck'
 type LoadState = 'idle' | 'loading' | 'error' | 'ready'
 
 const SITE = 'https://dsh-insights.com'
@@ -620,6 +622,203 @@ function ScenariosSection(props: {
   )
 }
 
+// ── section: 作者自检 Self-check ─────────────────────────────────────────────
+
+const CATEGORY_LABELS: Record<string, { zh: string; en: string }> = {
+  manifest: { zh: '清单', en: 'Manifest' },
+  selfcheck: { zh: '结构', en: 'Structure' },
+  docs: { zh: '文档', en: 'Docs' },
+  repo: { zh: '仓库', en: 'Repo' },
+  eng: { zh: '工程', en: 'Engineering' },
+  npm: { zh: 'npm', en: 'npm' },
+}
+const CATEGORY_ORDER = ['manifest', 'selfcheck', 'docs', 'repo', 'eng', 'npm']
+
+interface SelfcheckState {
+  state: LoadState
+  report?: SelfcheckReport
+  error?: unknown
+}
+
+function SelfcheckSection(): JSX.Element {
+  const [input, setInput] = useState('')
+  const [result, setResult] = useState<SelfcheckState>({ state: 'idle' })
+  const [hint, setHint] = useState('')
+
+  function submit(): void {
+    const dir = input.trim()
+    if (!dir.startsWith('/')) {
+      setHint(L('请输入本机插件目录的绝对路径（以 / 开头）', 'Enter the absolute path of a local plugin directory (starting with /)'))
+      return
+    }
+    setHint('')
+    setResult({ state: 'loading' })
+    fetchSelfcheck(dir)
+      .then((res) => setResult({ state: 'ready', report: res.report }))
+      .catch((error: unknown) => setResult({ state: 'error', error }))
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+        <input
+          style={inputStyle}
+          value={input}
+          placeholder={L('/abs/path/to/your-plugin（发布前本地体检）', '/abs/path/to/your-plugin (pre-publish local check)')}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') submit()
+          }}
+        />
+        <button style={buttonStyle} onClick={submit} disabled={result.state === 'loading'}>
+          {result.state === 'loading' ? L('自检中…', 'Checking…') : L('自检', 'Self-check')}
+        </button>
+      </div>
+      {hint && <div style={{ ...mutedStyle, color: '#ea580c', marginBottom: 8 }}>{hint}</div>}
+      <div style={{ ...mutedStyle, marginBottom: 12 }}>
+        {L(
+          '面向插件作者：按 health-v5 规则书对本机插件目录现场评分（dsh-plugin-health CLI 的 --dir 能力），含只读面安全扫描与 npm 一致性。只读，不修改任何文件。',
+          'For plugin authors: scores a local plugin directory on the spot with the health-v5 rulebook (the dsh-plugin-health CLI\'s --dir capability), including a read-only surface scan and npm consistency. Read-only; nothing is modified.',
+        )}
+      </div>
+
+      {result.state === 'error' && <ErrorNote error={result.error} />}
+      {result.report && <SelfcheckCard report={result.report} />}
+    </div>
+  )
+}
+
+function SelfcheckCard({ report }: { report: SelfcheckReport }): JSX.Element {
+  // Group deductions by rule-code category (prefix before the first dot).
+  const groups = new Map<string, SelfcheckReport['drops']>()
+  for (const d of report.drops) {
+    const category = d.code.split('.')[0] ?? 'misc'
+    const list = groups.get(category) ?? []
+    list.push(d)
+    groups.set(category, list)
+  }
+  const orderedCategories = [...groups.keys()].sort(
+    (a, b) => (CATEGORY_ORDER.indexOf(a) + 1 || 99) - (CATEGORY_ORDER.indexOf(b) + 1 || 99),
+  )
+  const badgeColor = (GRADE_COLORS[report.grade] ?? '#64748b').slice(1)
+  const badgeMarkdown = `![health](https://img.shields.io/badge/health-${report.grade}%20${report.score}-${badgeColor})`
+  const scan = report.scan
+
+  return (
+    <div>
+      <div style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 8 }}>
+          <GradeBadge grade={report.grade} large />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>
+              {report.pkgName ?? L('（未声明包名）', '(no package name)')}{report.version ? `@${report.version}` : ''}
+            </div>
+            <div style={mutedStyle}>
+              {L('得分', 'Score')} {report.score}/100
+              {report.npm && (
+                <span style={{ marginLeft: 10 }}>
+                  {report.npm.error
+                    ? L('npm registry 不可达（npm 规则未计分）', 'npm registry unreachable (npm rules not scored)')
+                    : report.npm.published
+                      ? `npm latest ${report.npm.latest ?? '?'} · ${report.npm.versions ?? '?'} ${L('个版本', 'releases')}`
+                      : L('npm 未发布', 'not published to npm')}
+                </span>
+              )}
+            </div>
+            <div style={{ ...mutedStyle, wordBreak: 'break-all' }}>{report.dir}</div>
+          </div>
+        </div>
+        <div style={{ marginBottom: 4, fontWeight: 600, fontSize: 12 }}>{L('徽章 markdown', 'Badge markdown')}</div>
+        <code style={{ display: 'block', ...mutedStyle, border: '1px solid var(--border, #e2e5e9)', borderRadius: 6, padding: '6px 8px', wordBreak: 'break-all', userSelect: 'all' }}>
+          {badgeMarkdown}
+        </code>
+      </div>
+
+      {report.drops.length === 0 ? (
+        <div style={{ ...cardStyle, borderColor: '#16a34a' }}>
+          <span style={{ color: '#16a34a', fontWeight: 600 }}>{L('全部通过，无扣分项', 'All checks passed — no deductions')}</span>
+        </div>
+      ) : (
+        orderedCategories.map((category) => (
+          <div key={category} style={cardStyle}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>
+              {CATEGORY_LABELS[category] ? L(CATEGORY_LABELS[category].zh, CATEGORY_LABELS[category].en) : category}
+              <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
+                −{groups.get(category)!.reduce((acc, d) => acc + ({ fail: 20, major: 10, warn: 5, minor: 2 } as Record<DropSeverity, number>)[d.sev], 0)}
+              </span>
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+              {groups.get(category)!.map((d) => (
+                <li key={d.code} style={{ padding: '3px 0' }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                    <span style={{ color: SEV_COLORS[d.sev] ?? '#64748b', fontSize: 11, fontWeight: 700, minWidth: 44, textTransform: 'uppercase', flexShrink: 0 }}>
+                      {d.sev}
+                    </span>
+                    <span>{L(d.label.zh, d.label.en)}</span>
+                    <code style={{ ...mutedStyle, fontSize: 11 }}>{d.code}</code>
+                  </div>
+                  {(d.fix.zh || d.fix.en) && (
+                    <div style={{ ...mutedStyle, marginLeft: 52 }}>
+                      {L('怎么修：', 'Fix: ')}{L(d.fix.zh, d.fix.en)}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      )}
+
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('只读面安全扫描', 'Read-only surface scan')}</div>
+        <div style={{ ...mutedStyle, marginBottom: 6 }}>
+          {L(
+            '源码 {files} 个 · 消毒引用 {san} 个{danger}',
+            '{files} source files · {san} with sanitization refs{danger}',
+            {
+              files: scan.srcFiles,
+              san: scan.sanitizedRefs,
+              danger: scan.dangerouslySetInnerHTML ? L(' · ⚠ 存在 dangerouslySetInnerHTML', ' · ⚠ dangerouslySetInnerHTML present') : '',
+            },
+          )}
+        </div>
+        {scan.totalHits === 0 ? (
+          <div style={{ color: '#16a34a', fontSize: 12 }}>{L('未发现写盘 / 子进程 / HTTP 写动词', 'No fs writes / child processes / HTTP write verbs found')}</div>
+        ) : (
+          <>
+            <div style={{ ...mutedStyle, marginBottom: 4 }}>
+              {L('{n} 处命中（宣称"只读"的插件需逐条解释）：', '{n} hit(s) (plugins claiming read-only must justify each):', { n: scan.totalHits })}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+              {scan.hits.map((hit, index) => (
+                <li key={index} style={{ fontSize: 12, padding: '1px 0' }}>
+                  <code>{hit.file}</code>
+                  <span style={mutedStyle}> → {hit.kind}（{hit.match}）</span>
+                </li>
+              ))}
+            </ul>
+            {scan.totalHits > scan.hits.length && (
+              <div style={mutedStyle}>{L('…等共 {n} 处', '…{n} in total', { n: scan.totalHits })}</div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('本地不可判定的规则（不计分）', 'Rules not decidable locally (not scored)')}</div>
+        <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+          {report.uncovered.map((u) => (
+            <li key={u.code} style={{ fontSize: 12, padding: '1px 0' }}>
+              <code style={mutedStyle}>{u.code}</code>
+              <span style={mutedStyle}> — {L(u.reason.zh, u.reason.en)}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 // ── the panel ────────────────────────────────────────────────────────────────
 
 const backdropStyle: CSSProperties = {
@@ -721,6 +920,7 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
     { id: 'audit', label: L('体检', 'Audit') },
     { id: 'check', label: L('查验', 'Check') },
     { id: 'scenarios', label: L('场景', 'Scenarios') },
+    { id: 'selfcheck', label: L('作者自检', 'Self-check') },
   ]
 
   let body: ReactNode
@@ -728,8 +928,10 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
     body = <AuditSection onPick={jumpToCheck} />
   } else if (section === 'check') {
     body = <CheckSection query={checkQuery} onQueryChange={setCheckQuery} result={check} onCheck={runCheck} />
-  } else {
+  } else if (section === 'scenarios') {
     body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={jumpToCheck} />
+  } else {
+    body = <SelfcheckSection />
   }
 
   return (

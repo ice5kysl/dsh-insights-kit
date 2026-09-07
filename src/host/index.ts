@@ -13,6 +13,9 @@
  *   rows (no dimScores/drops).
  * - `GET /dsh-insights/audit?npm=a,b,c` — batch health lookup by npm package
  *   name (the「我的插件体检」page); each name maps to a trimmed card or null.
+ * - `GET /dsh-insights/selfcheck?dir=<abs>` — author self-check of a local
+ *   plugin directory: health-v5 scoring on the on-disk layout, read-only
+ *   surface scan, npm consistency (the dsh-plugin-health CLI's --dir mode).
  * - `GET /dsh-insights/scenarios` — scenarios.json passthrough.
  * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
@@ -39,6 +42,7 @@ import {
   trimPlugin,
   type InsightsStore,
 } from './upstream.ts'
+import { SelfcheckError, runSelfcheck } from './selfcheck.ts'
 
 export const name = 'insights'
 
@@ -93,7 +97,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,selfcheck,health} (read-only)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -169,6 +173,11 @@ async function handleRequest(
       })
       return
     }
+    if (pathname === `${PREFIX}/selfcheck`) {
+      const report = await runSelfcheck((url.searchParams.get('dir') ?? '').trim())
+      sendJson(res, 200, { ok: true, report })
+      return
+    }
     if (pathname === `${PREFIX}/scenarios`) {
       sendJson(res, 200, { ok: true, scenarios: await store.scenarios() })
       return
@@ -194,6 +203,7 @@ async function handleRequest(
           '/dsh-insights/plugin?full_name=owner/repo',
           '/dsh-insights/search?q=&limit=',
           '/dsh-insights/audit?npm=a,b,c',
+          '/dsh-insights/selfcheck?dir=/abs/path',
           '/dsh-insights/scenarios',
           '/dsh-insights/dynamics',
           '/dsh-insights/health',
@@ -206,6 +216,11 @@ async function handleRequest(
     if (error instanceof UpstreamError) {
       log.info('upstream fetch failed', error.url, error.message)
       sendJson(res, 502, { ok: false, error: wireError('upstream', error.message) })
+      return
+    }
+    if (error instanceof SelfcheckError) {
+      const status = error.code === 'not-a-directory' ? 404 : 400
+      sendJson(res, status, { ok: false, error: wireError(error.code, error.message) })
       return
     }
     log.info('request failed', url.pathname, (error as Error).message)

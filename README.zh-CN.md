@@ -11,6 +11,7 @@
 - **体检**——通过官方 `pluginInventory` Remote（Cordis Loader 实时状态）**枚举你已安装的插件**并批量体检：每个插件显示等级徽章 + 分数，顶部 S/A/B/C/D 汇总条，**npm 版本漂移提醒**（npm latest ≠ 仓库版本），低分（C/D）行附「同类更优替代 ↗」链接——另有 **BREAKING 变更预警卡**，提示官方 dsh release 可能需要插件适配。若当前构建未开放枚举网关，则优雅降级为**版本与兼容性提醒**页（dist-tags、标红 BREAKING 的最近 releases、建议动作）。
 - **查验**——输入 `owner/repo` **或直接粘贴 GitHub URL**；得到健康卡：大等级徽章（S 紫 / A 绿 / B 蓝 / C 橙 / D 红）、0–100 分数、四维子分条（工程/文档/可发现/维护）、带严重级别的扣分明细，以及「在 dsh-insights.com 查看完整页 ↗」链接。未收录的仓库会明确提示**「不在权威集」**，而不是编造分数。
 - **场景**——按使用场景浏览推荐插件（名称/等级/一句话理由）；点任意插件直接跳到「查验」并加载它的健康卡。
+- **作者自检**——面向插件作者：输入**本机插件目录路径**，按 health-v5 规则书对目录现场评分（把 [dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health) CLI 的 `--dir` 能力搬进 dsh）：分数 + 等级卡、**逐条带「怎么修」指引**的分类扣分明细、**只读面安全扫描**（fs 写 / 子进程 / HTTP 写动词 / 消毒引用）、**npm 一致性**（是否发布 / latest 与本地 version 是否脱节 / 发布是否陈旧），以及可直接粘贴的**徽章 markdown**。全程只读，不修改目录。
 - **中英双语 UI**：按浏览器语言自动判断（zh → 中文，其余 → 英文）；面板顶栏「中 / EN」按钮随时切换并记住偏好。
 
 ## 为什么需要 host 面路由（设计说明）
@@ -22,11 +23,12 @@
 | `/dsh-insights/plugin?full_name=owner/repo` | 单插件健康卡（修剪字段：`full_name/stars/grade/score/dimScores/drops/npm/version/description/url`）；上游扣分码补全为 `{code, sev, label}`；未收录返回 404 `not-in-corpus` |
 | `/dsh-insights/search?q=&limit=20` | `full_name` + `description` 子串匹配（大小写不敏感），按 stars 排序；紧凑行（不含 `dimScores`/`drops`） |
 | `/dsh-insights/audit?npm=a,b,c` | 按 npm 包名批量查健康卡（「体检」页用）：每个名字 → 修剪卡或 null（未收录） |
+| `/dsh-insights/selfcheck?dir=/abs/path` | 作者自检**本机插件目录**：按 health-v5 对目录现场评分（扣分带修复指引）+ 只读面扫描 + npm 一致性；路径必须绝对、不含 `..`、为已存在目录 |
 | `/dsh-insights/scenarios` | `scenarios.json` 透传 |
 | `/dsh-insights/dynamics` | `dynamics.json` 透传 |
 | `/dsh-insights/health` | 探活 + 各文档缓存年龄 |
 
-- **上游**：`https://dsh-insights.com/data/{insights,dynamics}.json`，另加公开仓库 raw 文件提供的 `scenarios.json`（它不在站点 `/data/` 下发布）——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。
+- **上游**：`https://dsh-insights.com/data/{insights,scenarios,dynamics}.json`——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。（自检路由另外查询 npm registry，可用 `DSH_INSIGHTS_NPM_REGISTRY` 覆盖。）
 - **只读**，无写端点；每个请求都过一道与官方 `/api` 一致的主机信任门（回环 Host 直接信任，其余需要同源 Origin 标记）。**这不是认证层**——与官方 web server 同一姿态（默认绑定 127.0.0.1）。
 - 路由经 `ctx.effect(() => ctx.webServer.register(...))` 注册，插件 fiber 卸载时自动释放。
 
@@ -53,9 +55,9 @@ bash scripts/install-personal.sh   # 等价于 dsh plugin --profile web add <本
 
 ## 截图
 
-| 体检 | 查验 | 场景 |
-|---|---|---|
-| _（截图占位）_ | _（截图占位）_ | _（截图占位）_ |
+| 体检 | 查验 | 场景 | 作者自检 |
+|---|---|---|---|
+| _（截图占位）_ | _（截图占位）_ | _（截图占位）_ | _（截图占位）_ |
 
 ## 数据来源与许可
 

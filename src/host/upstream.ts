@@ -7,8 +7,7 @@
  * 6h keeps data fresh without hammering the static host):
  *
  * - `insights.json`  (~6 MB; per-plugin health rows for the whole corpus)
- * - `scenarios.json` (scenario → recommended plugins; not served on the
- *   site's /data/ — fetched from the public dsh-insights repo's raw file)
+ * - `scenarios.json` (scenario → recommended plugins)
  * - `dynamics.json`  (dsh releases + platform repo activity)
  *
  * The store is dependency-injected (`fetchJson`, `baseUrl`, `ttlMs`) so the
@@ -24,16 +23,13 @@ export const DEFAULT_BASE_URL = 'https://dsh-insights.com/data'
 export const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000
 
 /**
- * Per-document default origins. The site publishes most of the dataset under
- * /data/, but `scenarios.json` is only consumed by the static page build and
- * is NOT served on the site — it is however tracked in the public
- * ice5kysl/dsh-insights repo, so its canonical URL is the raw file.
- * `StoreOptions.baseUrl` (or DSH_INSIGHTS_UPSTREAM_BASE) overrides all three
- * with a single `<base>/<name>.json` origin (fixtures, mirrors).
+ * Per-document default origins: the whole dataset is served under the site's
+ * /data/. `StoreOptions.baseUrl` (or DSH_INSIGHTS_UPSTREAM_BASE) overrides
+ * all three with a single `<base>/<name>.json` origin (fixtures, mirrors).
  */
 const DEFAULT_DOC_URLS: Record<string, string> = {
   insights: `${DEFAULT_BASE_URL}/insights.json`,
-  scenarios: 'https://raw.githubusercontent.com/ice5kysl/dsh-insights/main/data/scenarios.json',
+  scenarios: `${DEFAULT_BASE_URL}/scenarios.json`,
   dynamics: `${DEFAULT_BASE_URL}/dynamics.json`,
 }
 

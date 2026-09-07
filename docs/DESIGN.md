@@ -25,10 +25,8 @@ src/client/index.ts ──build──▶ lib/client.js  (CJS body in the window.
 ## Data flow
 
 ```
-dsh-insights.com/data/{insights,dynamics}.json  (open dataset, regenerated ~daily)
-raw.githubusercontent.com/ice5kysl/dsh-insights/main/data/scenarios.json
-        (scenarios.json is tracked in the public repo but not served under the
-        site's /data/; DSH_INSIGHTS_UPSTREAM_BASE overrides all docs to one origin)
+dsh-insights.com/data/{insights,scenarios,dynamics}.json  (open dataset, regenerated ~daily)
+        (DSH_INSIGHTS_UPSTREAM_BASE overrides all docs to one origin)
         ▲  lazy fetch on first request, in-memory cache, TTL 6h
         │  (failed fetches never poison the cache; concurrent firsts share one in-flight promise)
 host face: GET /dsh-insights/* on ctx.webServer (read-only, JSON)
@@ -49,6 +47,7 @@ isn't data traffic: a local Typert Remote call, see below.)
 | `/plugin?full_name=owner/repo` | One plugin's health card, trimmed: `full_name/stars/grade/score/dimScores/drops/npm/version/description/url`. Upstream drops are bare code strings; the host enriches them to `{code, sev, label:{zh,en}}` via the health-v5 rule table (`src/host/drops.ts`). 404 `not-in-corpus` when absent. |
 | `/search?q=&limit=20` | Case-insensitive substring match over `full_name` + `description`, ranked by stars desc; compact rows without `dimScores`/`drops`. Limit capped at 50. |
 | `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted. Comma-separated, capped at 100 names. |
+| `/selfcheck?dir=/abs/path` | Author self-check of a local plugin directory (see below). |
 | `/scenarios` | `scenarios.json` passthrough. |
 | `/dynamics` | `dynamics.json` passthrough. |
 | `/health` | Liveness + per-document cache age/staleness. |
@@ -61,6 +60,38 @@ server, which binds 127.0.0.1 by default.
 Upstream errors surface as `502 { ok:false, error:{code:'upstream'} }`;
 malformed input as 400; missing corpus entries as 404. All responses carry an
 `ok` envelope (`{ ok:true, ... }` / `{ ok:false, error:{code,message} }`).
+
+## Author self-check (`src/host/selfcheck.ts`)
+
+`/selfcheck?dir=<abs>` is the [dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health)
+CLI's `--dir` capability rebuilt on the host face:
+
+- **Input validation**: the path must be absolute, contain no `..` segments,
+  and resolve to an existing directory with a parseable `package.json`
+  (400 `invalid-path` / `no-package-json` / `bad-package-json`, 404
+  `not-a-directory`). Everything it reads stays under that directory.
+- **Scoring**: the health-v5 rulebook applied to the on-disk layout —
+  manifest (`dsh.bundle.patch` declared + patch file present, `main =
+  lib/index.js`, `exports["./client"]`, `files` whitelist, built `lib/`
+  artifacts), docs (README presence + 400-byte floor, zh README, description,
+  `docs/`), repo (LICENSE, keywords as the local topics proxy), engineering
+  (tests, CI), and npm consistency (unpublished / version drift / single
+  release / >90-day-stale, from the registry with a 10s timeout; registry
+  base overridable via `DSH_INSIGHTS_NPM_REGISTRY`, and an unreachable
+  registry skips npm rules instead of guessing). Weights and grade
+  thresholds mirror the site: fail −20 / major −10 / warn −5 / minor −2 from
+  100, S≥95/A≥90/B≥75/C≥60/D. Every deduction carries per-code fix guidance
+  (`fix: {zh, en}`). Rules needing GitHub/git metadata (topics, activity,
+  single-push, batch-import) are returned in `uncovered` with reasons and
+  never scored.
+- **Read-only surface scan**: ported from the CLI — fs writes (incl. bare
+  `writeFileSync(` imports, which the CLI missed), child processes (`.exec(`
+  regex calls excluded via lookbehind), HTTP write verbs (`Map.delete` etc.
+  excluded the same way), sanitization references and
+  `dangerouslySetInnerHTML`. Informational only — never affects the score.
+- The report powers the「作者自检」panel section: score+grade card with a
+  shields.io badge-markdown preview, deductions grouped by category with fix
+  text, scan findings, npm line, and the uncovered-rules list.
 
 ## Caching (`src/host/upstream.ts`)
 
@@ -95,7 +126,7 @@ uses, whose usage we verified in its source):
   the entry moved off `conversation.view`: the toolkit is session-independent,
   and the drawer is reachable from every screen, not only inside a session.
 
-Three capability sections, each fetching lazily on first visit:
+Four capability sections, each fetching lazily on first visit:
 
 1. **体检 Audit** — installed-plugin health check (see the enumeration note
    below): per-plugin grade badge + score, an S/A/B/C/D summary bar, npm
@@ -110,6 +141,10 @@ Three capability sections, each fetching lazily on first visit:
    notice on `not-in-corpus`. Rows in Audit/Scenarios jump here.
 3. **场景 Scenarios** — scenario cards with recommended plugin rows;
    clicking a row jumps to Check with that plugin loaded.
+4. **作者自检 Self-check** — a local plugin directory path → `/selfcheck` →
+   report card (score + grade, shields.io badge markdown preview, deductions
+   grouped by category with fix guidance, read-only surface scan findings,
+   npm consistency, uncovered-rules list). Read-only; nothing is modified.
 
 ### Installed-plugin enumeration (research conclusion)
 
@@ -148,11 +183,14 @@ README's verification note).
 
 ## Testing / CI
 
-`scripts/smoke.mjs` (run as `npm test`, also in CI) boots a fixture upstream +
-a fake `ctx.webServer` and covers: trimming + drop enrichment (+ `npmLatest`),
+`scripts/smoke.mjs` (run as `npm test`, also in CI) boots a fixture upstream,
+a fake npm registry, four fixture plugin directories, and a fake
+`ctx.webServer`; it covers: trimming + drop enrichment (+ `npmLatest`),
 corpus 404, input validation, search matching/ranking/limits, the audit batch
 lookup (hit/null/case/400), the inventory-entry → npm-name mapping and
 filtering (imported from `src/shared/installed.ts`, node type-stripping),
+self-check (well-built S/100, skeletal plugin's full deduction set, write-
+surface scan kinds, npm drift/single/stale, path validation 400s and 404),
 both passthroughs, cache health, the trust gate (403/200), upstream-failure →
 502, and cache isolation across instances. CI:
 `npm install → typecheck → build → smoke → npm pack --dry-run`.

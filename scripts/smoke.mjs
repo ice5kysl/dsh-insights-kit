@@ -14,6 +14,9 @@
  */
 
 import { createServer, request as httpRequest } from 'node:http'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply } from '../lib/index.js'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 
@@ -108,6 +111,111 @@ const fixture = createServer((req, res) => {
 await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve))
 const fixturePort = fixture.address().port
 process.env.DSH_INSIGHTS_UPSTREAM_BASE = `http://127.0.0.1:${fixturePort}`
+
+// ── fake npm registry (selfcheck consistency checks) ────────────────────────
+
+const registry = createServer((req, res) => {
+  const name = decodeURIComponent((req.url ?? '').replace(/^\//, ''))
+  if (name === 'good-pkg') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      'dist-tags': { latest: '1.0.0' },
+      versions: { '0.9.0': {}, '1.0.0': {} },
+      time: { created: '2026-08-01T00:00:00.000Z', '1.0.0': new Date().toISOString() },
+    }))
+  } else if (name === 'drift-pkg') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      'dist-tags': { latest: '9.9.9' },
+      versions: { '9.9.9': {} },
+      time: { created: '2025-01-01T00:00:00.000Z', '9.9.9': '2025-06-01T00:00:00.000Z' },
+    }))
+  } else {
+    res.writeHead(404)
+    res.end('nope')
+  }
+})
+await new Promise((resolve) => registry.listen(0, '127.0.0.1', resolve))
+process.env.DSH_INSIGHTS_NPM_REGISTRY = `http://127.0.0.1:${registry.address().port}`
+
+// ── selfcheck fixture plugin directories ─────────────────────────────────────
+
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'dsh-insights-kit-smoke-'))
+
+function writeTree(dir, files) {
+  for (const [rel, content] of Object.entries(files)) {
+    const full = join(dir, rel)
+    mkdirSync(join(full, '..'), { recursive: true })
+    writeFileSync(full, content)
+  }
+}
+
+const GOOD_PKG = {
+  name: 'good-pkg',
+  version: '1.0.0',
+  description: 'A well-built dsh plugin used by the smoke fixtures',
+  main: 'lib/index.js',
+  license: 'MIT',
+  keywords: ['dsh', 'deepseek-harness', 'cordis', 'plugin'],
+  files: ['lib', 'cordis.patch.yml', 'README.md', 'README.zh-CN.md', 'LICENSE'],
+  exports: { '.': { default: './lib/index.js' }, './client': { default: './lib/client.js' } },
+  dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } },
+}
+const goodDir = join(fixtureRoot, 'good-plugin')
+writeTree(goodDir, {
+  'package.json': JSON.stringify(GOOD_PKG, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: good\n      name: good-pkg\n',
+  'lib/index.js': 'export const name = "good"\n',
+  'lib/client.js': 'window.__ModuleLoader__ = window.__ModuleLoader__ || {}\n',
+  'README.md': `# good-pkg\n\n${'A well-documented fixture plugin. '.repeat(20)}\n`,
+  'README.zh-CN.md': '# good-pkg\n\n中文文档。\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/good.test.mjs': 'import test from "node:test"\ntest("ok", () => {})\n',
+  '.github/workflows/ci.yml': 'name: ci\non: [push]\n',
+  'src/index.ts': 'export function apply(): void {\n  element.textContent = "safe"\n}\n',
+})
+
+const badDir = join(fixtureRoot, 'bad-plugin')
+writeTree(badDir, {
+  'package.json': JSON.stringify({ name: 'bad-pkg', version: '0.0.1' }, null, 2),
+})
+
+const writingDir = join(fixtureRoot, 'writing-plugin')
+writeTree(writingDir, {
+  'package.json': JSON.stringify({ ...GOOD_PKG, name: 'writing-pkg' }, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: writing\n      name: writing-pkg\n',
+  'lib/index.js': 'export {}\n',
+  'lib/client.js': 'export {}\n',
+  'README.md': `# writing-pkg\n\n${'Docs. '.repeat(80)}\n`,
+  'README.zh-CN.md': '# writing-pkg\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/w.test.mjs': 'export {}\n',
+  '.github/workflows/ci.yml': 'name: ci\n',
+  'src/evil.ts': [
+    'import { writeFileSync } from "node:fs"',
+    'import { exec } from "node:child_process"',
+    'writeFileSync("/tmp/x", "y")',
+    'exec("rm -rf /tmp/x")',
+    'await fetch("https://example.com", { method: "POST" })',
+  ].join('\n'),
+})
+
+const driftDir = join(fixtureRoot, 'drift-plugin')
+writeTree(driftDir, {
+  'package.json': JSON.stringify({ ...GOOD_PKG, name: 'drift-pkg', version: '1.0.0' }, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: drift\n      name: drift-pkg\n',
+  'lib/index.js': 'export {}\n',
+  'lib/client.js': 'export {}\n',
+  'README.md': `# drift-pkg\n\n${'Docs. '.repeat(80)}\n`,
+  'README.zh-CN.md': '# drift-pkg\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/d.test.mjs': 'export {}\n',
+  '.github/workflows/ci.yml': 'name: ci\n',
+  'src/index.ts': 'export const x = 1\n',
+})
 
 // ── plugin under test (fake ctx.webServer contract) ─────────────────────────
 
@@ -305,6 +413,76 @@ await check('health reports cache ages for loaded docs', async () => {
   }
 })
 
+await check('selfcheck: well-built plugin scores S/100 with no drops', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(goodDir))
+  if (status !== 200 || !body.ok) throw new Error(`status ${status} ${JSON.stringify(body)}`)
+  const r = body.report
+  if (r.score !== 100 || r.grade !== 'S') throw new Error(`score ${r.score} grade ${r.grade}: ${JSON.stringify(r.drops)}`)
+  if (r.drops.length !== 0) throw new Error(`unexpected drops: ${r.drops.map((d) => d.code)}`)
+  if (r.pkgName !== 'good-pkg' || r.version !== '1.0.0') throw new Error('pkg fields wrong')
+  if (r.npm?.published !== true || r.npm.latest !== '1.0.0') throw new Error('npm report wrong')
+  if (r.scan.totalHits !== 0) throw new Error(`scan should be clean: ${JSON.stringify(r.scan.hits)}`)
+  if (!Array.isArray(r.uncovered) || r.uncovered.length === 0) throw new Error('uncovered list missing')
+})
+
+await check('selfcheck: skeletal plugin collects the expected rule codes', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(badDir))
+  if (status !== 200) throw new Error(`status ${status}`)
+  const r = body.report
+  const codes = new Set(r.drops.map((d) => d.code))
+  const want = [
+    'docs.no-readme', 'npm.unpublished', 'selfcheck.no-bundle-patch',
+    'manifest.no-client-export', 'manifest.not-lib-main', 'manifest.no-files-whitelist',
+    'selfcheck.lib-missing', 'docs.zh-missing', 'docs.no-description', 'docs.no-docs-dir',
+    'repo.no-license', 'selfcheck.no-keywords', 'eng.no-tests', 'eng.no-ci',
+  ]
+  for (const code of want) {
+    if (!codes.has(code)) throw new Error(`missing drop ${code} (got ${[...codes]})`)
+  }
+  if (r.grade !== 'D') throw new Error(`grade ${r.grade}, want D (score ${r.score})`)
+  const readme = r.drops.find((d) => d.code === 'docs.no-readme')
+  if (readme.sev !== 'fail' || !readme.fix.zh) throw new Error('fail sev or fix guidance missing')
+  if (r.npm?.published !== false) throw new Error('npm should be unpublished')
+})
+
+await check('selfcheck: write-surface scan flags fs/child-process/http-write', async () => {
+  const { body } = await getJson('/selfcheck?dir=' + encodeURIComponent(writingDir))
+  const kinds = new Set(body.report.scan.hits.map((h) => h.kind))
+  for (const kind of ['文件系统写 fs-write', '子进程执行 child-process', 'HTTP 写动词 http-write']) {
+    if (!kinds.has(kind)) throw new Error(`scan kind missing: ${kind} (got ${[...kinds]})`)
+  }
+  if (body.report.scan.totalHits < 3) throw new Error('totalHits wrong')
+  if (!body.report.scan.hits[0].file.endsWith('evil.ts')) throw new Error('hit file wrong')
+})
+
+await check('selfcheck: npm drift + single-release + stale are scored', async () => {
+  const { body } = await getJson('/selfcheck?dir=' + encodeURIComponent(driftDir))
+  const codes = new Set(body.report.drops.map((d) => d.code))
+  for (const code of ['npm.version-drift', 'npm.single-release', 'npm.release-stale']) {
+    if (!codes.has(code)) throw new Error(`missing ${code} (got ${[...codes]})`)
+  }
+})
+
+await check('selfcheck: relative path rejected (400)', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('some/relative/dir'))
+  if (status !== 400 || body.error?.code !== 'invalid-path') throw new Error(`status ${status}`)
+})
+
+await check('selfcheck: .. traversal rejected (400)', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('/tmp/../etc'))
+  if (status !== 400 || body.error?.code !== 'invalid-path') throw new Error(`status ${status}`)
+})
+
+await check('selfcheck: nonexistent dir -> 404', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('/tmp/dsh-no-such-dir-xyz'))
+  if (status !== 404 || body.error?.code !== 'not-a-directory') throw new Error(`status ${status}`)
+})
+
+await check('selfcheck: dir without package.json -> 400', async () => {
+  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(fixtureRoot))
+  if (status !== 400 || body.error?.code !== 'no-package-json') throw new Error(`status ${status}`)
+})
+
 /** Raw HTTP GET with an explicit Host header (undici fetch forbids it). */
 function rawGet(hostHeader, path = '/dsh-insights/health') {
   return new Promise((resolve, reject) => {
@@ -353,6 +531,7 @@ await check('first instance cache survives second instance failure', async () =>
 
 await new Promise((resolve) => server.close(resolve))
 await new Promise((resolve) => fixture.close(resolve))
+await new Promise((resolve) => registry.close(resolve))
 
 if (failed > 0) {
   console.log(`\n${failed} check(s) failed`)
