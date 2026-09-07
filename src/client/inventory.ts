@@ -3,19 +3,20 @@
  *
  * The host ships a read-only projection of the Cordis Loader state,
  * `@deepseek-ai/dsh-host-plugin-inventory` (Remote namespace
- * `pluginInventory`, method `list`). The client-side gateway
- * (`ctx.remote`, provided by dsh-api-gateway) can mount any generated
- * contribution at runtime — `TypertClientRemote.$mount` — so a dynamically
- * loaded plugin like this one can enumerate the Loader entries without any
- * custom RPC. The contribution descriptor is inlined here with a `src-json`
- * result codec (pass-through JSON), which avoids bundling zod (the official
- * generated artifact's only import) — the wire shape is identical, only the
- * client-side validation strictness differs.
+ * `pluginInventory`, method `list`). Standard dsh web builds pre-mount every
+ * official Remote at boot (dsh-api-remotes), so the namespace is already
+ * present on `ctx.remote` — probe it and use it directly.
  *
- * Graceful degradation is a first-class path: if the host assembly of the
- * running dsh build does not expose the inventory gateway, `mountInventory`
- * resolves to null and the「我的插件体检」page falls back to the
- * version/compatibility reminder form.
+ * Mounting the contribution ourselves (`TypertClientRemote.$mount`) is
+ * deliberately NOT done: the gateway rejects non-strict codecs at mount time
+ * (`requireStrictCodec` in dsh-api-gateway), so a self-mount would have to
+ * bundle the official descriptor's zod schema — hundreds of KB on every page
+ * load — and on standard builds it would collide with the pre-mounted
+ * namespace ("already mounted") anyway.
+ *
+ * Graceful degradation is a first-class path: when the probe finds no usable
+ * namespace, `mountInventory` resolves to null and the「我的插件体检」page
+ * falls back to the version/compatibility reminder form.
  *
  * @module dsh-insights-kit/inventory
  */
@@ -40,7 +41,6 @@ interface RemoteResult<T> {
 
 /** Minimal face of the client Remote gateway this plugin consumes. */
 export interface RemoteLike {
-  $mount(contribution: unknown): Promise<unknown>
   pluginInventory?: {
     list(): Promise<RemoteResult<{ entries: readonly PluginInventoryEntry[] }>>
   }
@@ -48,33 +48,11 @@ export interface RemoteLike {
 
 export type InventoryLister = () => Promise<readonly PluginInventoryEntry[]>
 
-/** Generated-equivalent contribution for pluginInventory/list (src-json codec). */
-const PLUGIN_INVENTORY_CONTRIBUTION = {
-  package: '@deepseek-ai/dsh-host-plugin-inventory',
-  descriptors: [
-    {
-      id: '@deepseek-ai/dsh-host-plugin-inventory#pluginInventory/list',
-      service: 'pluginInventory',
-      namespace: 'pluginInventory',
-      method: 'list',
-      invocation: { kind: 'direct' },
-      parameters: [],
-      result: { mode: 'src-json' },
-    },
-  ],
-}
-
 /**
- * Mount the inventory namespace in this plugin's fiber and return a lister;
- * resolve to null when the running host does not serve the gateway (older or
- * differently composed dsh builds) or the mount itself fails.
+ * Probe `remote.pluginInventory` and wrap it as a lister; null when the
+ * namespace is absent (enumeration unavailable on this build).
  */
-export async function mountInventory(remote: RemoteLike): Promise<InventoryLister | null> {
-  try {
-    await remote.$mount(PLUGIN_INVENTORY_CONTRIBUTION)
-  } catch {
-    return null
-  }
+function listerOf(remote: RemoteLike): InventoryLister | null {
   const ns = remote.pluginInventory
   if (!ns || typeof ns.list !== 'function') return null
   return async () => {
@@ -84,6 +62,14 @@ export async function mountInventory(remote: RemoteLike): Promise<InventoryListe
     }
     return result.value.entries
   }
+}
+
+/**
+ * Resolve the inventory lister from the pre-mounted namespace; null when the
+ * running build does not expose it (enumeration unavailable → degraded page).
+ */
+export async function mountInventory(remote: RemoteLike): Promise<InventoryLister | null> {
+  return listerOf(remote)
 }
 
 // ── module-level stash (slot components get no ctx) ──────────────────────────

@@ -10,11 +10,11 @@
  *   the app (click-through until it opts into pointer events), hosting the
  *   three capability sections 体检 / 查验 / 场景.
  *
- * Also mounts the official `pluginInventory` Remote contribution on
- * `ctx.remote` so the 体检 section can enumerate installed plugins; the
- * mount is best-effort (builds without the inventory gateway degrade the
- * 体检 page to the version/compatibility reminder form, never breaking the
- * rest of the panel).
+ * Also probes the official `pluginInventory` Remote namespace on
+ * `ctx.remote` (pre-mounted by standard web builds via dsh-api-remotes) so
+ * the 体检 section can enumerate installed plugins; builds without the
+ * inventory namespace degrade the 体检 page to the version/compatibility
+ * reminder form, never breaking the rest of the panel.
  *
  * The same Loader entry carries the host face (`lib/index.js`, the
  * /dsh-insights routes), so this module ships as the package's `./client`
@@ -49,9 +49,9 @@ export function apply(raw: Context): void {
   const ctx = raw as unknown as ClientCtxLike
   const log = ctx.logger('insights:client')
 
-  // Best-effort inventory mount: slot components get no ctx, so stash the
-  // promise for the 体检 section (null = enumeration unavailable → degraded
-  // page). Never blocks the panel's other sections.
+  // Inventory probe: slot components get no ctx, so stash the promise for
+  // the 体检 section (null = enumeration unavailable → degraded page).
+  // Never blocks the panel's other sections.
   setInventoryLister(mountInventory(ctx.remote))
 
   ctx.slots.inject('sidebar.footer.action', () =>
