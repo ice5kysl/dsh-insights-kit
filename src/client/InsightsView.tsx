@@ -48,7 +48,7 @@ import {
   type Scenario,
   type ScenariosDoc,
 } from './api.ts'
-import { getInventoryLister, installedPluginNames } from './inventory.ts'
+import { getInventoryLister, installedPluginNames, npmNameOfModule } from './inventory.ts'
 import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
@@ -333,6 +333,8 @@ type AuditForm = 'loading' | 'full' | 'degraded' | 'error'
 interface AuditState {
   form: AuditForm
   rows?: Array<{ name: string; card: PluginCard | null }>
+  /** Enabled official @deepseek-ai/* baseline modules (shown for context, not audited). */
+  baseline?: number
   dynamics?: DynamicsDoc
   /** Running dsh version from /dsh-insights/runtime (null when unknown). */
   dshVersion?: string | null
@@ -365,13 +367,14 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
       try {
         const entries = await lister()
         const names = installedPluginNames(entries)
+        const baseline = entries.filter((e) => e.enabled && npmNameOfModule(e.moduleName).startsWith('@deepseek-ai/')).length
         if (names.length === 0) {
-          if (!cancelled) setAudit({ form: 'full', rows: [], dynamics, dshVersion })
+          if (!cancelled) setAudit({ form: 'full', rows: [], baseline, dynamics, dshVersion })
           return
         }
         const res = await fetchAudit(names)
         const rows = names.map((name) => ({ name, card: res.results[name] ?? null }))
-        if (!cancelled) setAudit({ form: 'full', rows, dynamics, dshVersion })
+        if (!cancelled) setAudit({ form: 'full', rows, baseline, dynamics, dshVersion })
       } catch (error) {
         if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion, error })
       }
@@ -469,6 +472,11 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
       <div style={cardStyle}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>
           {L('已装插件（{n}）', 'Installed plugins ({n})', { n: rows.length })}
+          {typeof audit.baseline === 'number' && audit.baseline > 0 && (
+            <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
+              {L('另有 {m} 个官方基线模块（设置 → 插件里能看到）不参与体检', 'plus {m} official baseline modules (visible under Settings → Plugins), not audited', { m: audit.baseline })}
+            </span>
+          )}
         </div>
         <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
           {rows.map((row) => {
