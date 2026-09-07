@@ -1,5 +1,5 @@
 {
-  "name": "dsh-insights-plugin",
+  "name": "dsh-insights-kit",
   "version": "0.1.0",
   "description": "dsh (DeepSeek Harness) plugin: the DSH Insights (dsh-insights.com) ecosystem assistant inside the chat GUI — check a plugin's health grade before installing, discover plugins by scenario, and follow ecosystem dynamics (host /dsh-insights routes on ctx.webServer + a conversation.view ecosystem tab).",
   "type": "module",
@@ -65,10 +65,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ice5kysl/dsh-insights-plugin.git"
+    "url": "git+https://github.com/ice5kysl/dsh-insights-kit.git"
   },
-  "homepage": "https://github.com/ice5kysl/dsh-insights-plugin",
+  "homepage": "https://github.com/ice5kysl/dsh-insights-kit",
   "bugs": {
-    "url": "https://github.com/ice5kysl/dsh-insights-plugin/issues"
+    "url": "https://github.com/ice5kysl/dsh-insights-kit/issues"
   }
 }

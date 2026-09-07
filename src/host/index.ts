@@ -1,5 +1,5 @@
 /**
- * dsh-insights-plugin — single Loader entry (package name `dsh-insights-plugin`).
+ * dsh-insights-kit — single Loader entry (package name `dsh-insights-kit`).
  *
  * Host face (this module): registers a read-only HTTP surface on the official
  * `ctx.webServer` route seam under `/dsh-insights`, proxying the open dataset
@@ -24,7 +24,7 @@
  * Browser face (`./client`): the「生态」session view tab (see src/client). It
  * consumes these routes with same-origin `fetch`.
  *
- * @module dsh-insights-plugin
+ * @module dsh-insights-kit
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -75,7 +75,7 @@ function wireError(code: string, message: string): WireError {
 export function apply(raw: unknown): void {
   const ctx = raw as HostCtxLike
   const log = ctx.logger('insights')
-  log.info('dsh-insights-plugin loaded (host /dsh-insights routes)')
+  log.info('dsh-insights-kit loaded (host /dsh-insights routes)')
 
   // DSH_INSIGHTS_UPSTREAM_BASE overrides the dataset origin (used by the
   // smoke test to serve fixtures; production installs leave it unset).
@@ -154,7 +154,7 @@ async function handleRequest(
     if (pathname === `${PREFIX}/health`) {
       sendJson(res, 200, {
         ok: true,
-        plugin: 'dsh-insights-plugin',
+        plugin: 'dsh-insights-kit',
         uptimeMs: Date.now() - startedAt,
         caches: store.status(),
       })
@@ -163,7 +163,7 @@ async function handleRequest(
     if (pathname === PREFIX) {
       sendJson(res, 200, {
         ok: true,
-        plugin: 'dsh-insights-plugin',
+        plugin: 'dsh-insights-kit',
         endpoints: [
           '/dsh-insights/plugin?full_name=owner/repo',
           '/dsh-insights/search?q=&limit=',

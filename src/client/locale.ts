@@ -1,8 +1,8 @@
 /**
- * Browser-side (client) locale detection for dsh-insights-plugin.
+ * Browser-side (client) locale detection for dsh-insights-kit.
  *
  * Resolution order:
- *   1. persisted preference `dsh.insights.locale` = `zh` | `en`
+ *   1. persisted preference `dsh.insights-kit.locale` = `zh` | `en`
  *      (see `setLocalePreference`; the「生态」tab header carries a 中/EN
  *      toggle that writes this);
  *   2. `navigator.language(s)` starting with `zh` → Chinese;
@@ -11,12 +11,12 @@
  * `L()` re-reads the current locale on every call, so UI re-renders after a
  * `setLocalePreference()` switch reflect the new language immediately.
  *
- * @module dsh-insights-plugin/client-locale
+ * @module dsh-insights-kit/client-locale
  */
 
 import { localize, normalizeLocale, type Locale, type Vars } from '../shared/i18n.ts'
 
-export const LOCALE_STORAGE_KEY = 'dsh.insights.locale'
+export const LOCALE_STORAGE_KEY = 'dsh.insights-kit.locale'
 
 let explicit: Locale | null = null
 

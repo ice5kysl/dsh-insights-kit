@@ -1,5 +1,5 @@
 /**
- * Build script for dsh-insights-plugin.
+ * Build script for dsh-insights-kit.
  *
  * - Host face: src/host/index.ts → lib/index.js (ESM, node; only node builtins
  *   are imported at runtime — @deepseek-ai/* stay type-only — so the artifact

@@ -1,5 +1,5 @@
 /**
- * dsh-insights-plugin — browser (client) face.
+ * dsh-insights-kit — browser (client) face.
  *
  * One registration on the official additive seam:
  *
@@ -13,7 +13,7 @@
  * /dsh-insights routes), so this module ships as the package's `./client`
  * export and only ever runs in the browser cordis tree.
  *
- * @module dsh-insights-plugin/client
+ * @module dsh-insights-kit/client
  */
 
 import type { Context } from '@deepseek-ai/cordis'

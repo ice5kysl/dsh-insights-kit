@@ -1,6 +1,6 @@
-# dsh-insights-plugin
+# dsh-insights-kit
 
-> GitHub: <https://github.com/ice5kysl/dsh-insights-plugin> ｜ MIT License ｜ 目标 dsh：`@deepseek-ai/dsh` ≥ 0.1.1-rc.2 ｜ [English](./README.md) · 简体中文
+> GitHub: <https://github.com/ice5kysl/dsh-insights-kit> ｜ MIT License ｜ 目标 dsh：`@deepseek-ai/dsh` ≥ 0.1.1-rc.2 ｜ [English](./README.md) · 简体中文
 
 一个按官方约定编写的 **dsh（DeepSeek Harness）插件**（bundle 形态）——它是 **[dsh-insights.com](https://dsh-insights.com)**（dsh 插件生态观察站：全量插件健康分 S–D、场景推荐、生态动态，数据以开放 JSON 发布）在 dsh 内的瘦客户端。它解决一个痛点：
 
@@ -36,14 +36,14 @@
 从 npm 安装（发布后）：
 
 ```bash
-dsh plugin --profile web add dsh-insights-plugin
+dsh plugin --profile web add dsh-insights-kit
 ```
 
 手动安装（clone 后）：
 
 ```bash
-git clone https://github.com/ice5kysl/dsh-insights-plugin.git
-cd dsh-insights-plugin
+git clone https://github.com/ice5kysl/dsh-insights-kit.git
+cd dsh-insights-kit
 npm install && npm run build
 bash scripts/install-personal.sh   # 等价于 dsh plugin --profile web add <本目录>
 ```

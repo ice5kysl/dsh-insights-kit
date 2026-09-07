@@ -8,4 +8,4 @@
 # 排在对话/轨迹之后).
 - insert:
     - id: insights
-      name: dsh-insights-plugin
+      name: dsh-insights-kit

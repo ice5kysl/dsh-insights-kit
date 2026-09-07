@@ -1,5 +1,5 @@
 /**
- * dsh-insights-plugin — the「生态」session view tab (browser face).
+ * dsh-insights-kit — the「生态」session view tab (browser face).
  *
  * Registers into the official `conversation.view` list slot (session scope),
  * so the session header grows a tab — 对话 | 轨迹 | 生态 (Chat | Trajectory |
@@ -21,7 +21,7 @@
  * talks to dsh-insights.com directly. Bilingual zh/en with the same toggle
  * idiom as the other kit plugins.
  *
- * @module dsh-insights-plugin/insights-view
+ * @module dsh-insights-kit/insights-view
  */
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'

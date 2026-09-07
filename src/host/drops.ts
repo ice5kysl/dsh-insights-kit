@@ -10,7 +10,7 @@
  * Codes not in the table (newer rule versions upstream) fall through to
  * `enrichDrop`'s default: sev `warn`, label = the raw code.
  *
- * @module dsh-insights-plugin/drops
+ * @module dsh-insights-kit/drops
  */
 
 export type DropSeverity = 'fail' | 'major' | 'warn' | 'minor'

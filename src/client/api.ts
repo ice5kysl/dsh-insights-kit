@@ -1,5 +1,5 @@
 /**
- * dsh-insights-plugin — browser-side fetch client for the host /dsh-insights
+ * dsh-insights-kit — browser-side fetch client for the host /dsh-insights
  * surface (same-origin, mirror of src/host wire shapes).
  *
  * The host routes live on the same web server that serves the GUI, so a
@@ -8,7 +8,7 @@
  *
  * Also owns the GitHub-URL → owner/repo parsing used by the「查验」input.
  *
- * @module dsh-insights-plugin/insights-api
+ * @module dsh-insights-kit/insights-api
  */
 
 import { L } from './locale.ts'

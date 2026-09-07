@@ -1,6 +1,6 @@
-# dsh-insights-plugin
+# dsh-insights-kit
 
-> GitHub: <https://github.com/ice5kysl/dsh-insights-plugin> ｜ MIT License ｜ Target dsh: `@deepseek-ai/dsh` ≥ 0.1.1-rc.2 ｜ English · [简体中文](./README.zh-CN.md)
+> GitHub: <https://github.com/ice5kysl/dsh-insights-kit> ｜ MIT License ｜ Target dsh: `@deepseek-ai/dsh` ≥ 0.1.1-rc.2 ｜ English · [简体中文](./README.zh-CN.md)
 
 A **dsh (DeepSeek Harness) plugin** written to official conventions, in "bundle" form — the thin in-dsh client of **[dsh-insights.com](https://dsh-insights.com)**, the observatory of the dsh plugin ecosystem (health grades S–D for the whole corpus, scenario picks, ecosystem dynamics, published as open JSON). It solves one pain point:
 
@@ -36,14 +36,14 @@ See [docs/DESIGN.md](./docs/DESIGN.md) for the full architecture note.
 From npm (once published):
 
 ```bash
-dsh plugin --profile web add dsh-insights-plugin
+dsh plugin --profile web add dsh-insights-kit
 ```
 
 Manual (from a clone):
 
 ```bash
-git clone https://github.com/ice5kysl/dsh-insights-plugin.git
-cd dsh-insights-plugin
+git clone https://github.com/ice5kysl/dsh-insights-kit.git
+cd dsh-insights-kit
 npm install && npm run build
 bash scripts/install-personal.sh   # = dsh plugin --profile web add <this dir>
 ```

@@ -1,5 +1,5 @@
 /**
- * Shared locale plumbing for dsh-insights-plugin.
+ * Shared locale plumbing for dsh-insights-kit.
  *
  * Pure helpers only — no `node` or `dom` globals here, so this module can be
  * imported from both the node and the browser side of the bundle and each
@@ -13,7 +13,7 @@
  *
  * Placeholders use `{name}` and are interpolated by `localize`.
  *
- * @module dsh-insights-plugin/i18n-core
+ * @module dsh-insights-kit/i18n-core
  */
 
 export type Locale = 'zh' | 'en'

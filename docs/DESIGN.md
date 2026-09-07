@@ -1,4 +1,4 @@
-# dsh-insights-plugin — architecture notes
+# dsh-insights-kit — architecture notes
 
 A standard Cordis **bundle** plugin for dsh (DeepSeek Harness), built to the
 same engineering conventions as `dsh-file-explorer-kit` / `dsh-workspace-kit`:
@@ -14,7 +14,7 @@ src/client/index.ts ──build──▶ lib/client.js  (CJS body in the window.
 - `package.json` `main`/`exports["."]` → host face; `exports["./client"]` +
   `dsh.client` metadata → the browser face served over `/plugins`.
 - `cordis.patch.yml` carries a single `insert` entry (`id: insights`,
-  `name: dsh-insights-plugin`) — the dsh client module system rejects
+  `name: dsh-insights-kit`) — the dsh client module system rejects
   multiple active sources resolving to one package name, so one entry carries
   both faces.
 - The client bundle externalizes only `react` / `react/jsx-runtime`

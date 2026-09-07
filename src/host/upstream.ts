@@ -15,7 +15,7 @@
  * smoke test can run it against a local fixture server with no network.
  * Trimming/search helpers are pure and exported for direct unit-style tests.
  *
- * @module dsh-insights-plugin/upstream
+ * @module dsh-insights-kit/upstream
  */
 
 import { enrichDrops, type DropInfo } from './drops.ts'

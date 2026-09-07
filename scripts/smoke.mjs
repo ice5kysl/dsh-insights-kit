@@ -164,7 +164,7 @@ async function getJson(path, headers) {
   return { status: res.status, body: await res.json() }
 }
 
-console.log('dsh-insights-plugin host smoke test:')
+console.log('dsh-insights-kit host smoke test:')
 
 await check('plugin returns trimmed card with enriched drops', async () => {
   const { status, body } = await getJson('/plugin?full_name=aaa/dsh-alpha')
