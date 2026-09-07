@@ -440,8 +440,6 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
   return (
     <div>
       <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
-      <DistTags tags={distTags} />
-      <BreakingCard releases={releases} />
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
         {GRADE_ORDER.map((grade) => (
@@ -532,6 +530,8 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
           })}
         </ul>
       </div>
+      <DistTags tags={distTags} />
+      <BreakingCard releases={releases} />
       <div style={mutedStyle}>
         {L(
           '「复制卸载命令」只复制到剪贴板：在终端执行，完成后重启 dsh web 生效。',
