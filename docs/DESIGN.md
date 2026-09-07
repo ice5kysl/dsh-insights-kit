@@ -26,7 +26,7 @@ src/cli.ts          ──build──▶ lib/cli.js     (ESM, node + shebang; th
 ## Data flow
 
 ```
-dsh-insights.com/data/{insights,scenarios,dynamics,compat}.json  (open dataset, regenerated ~daily)
+dsh-insights.com/data/{insights,scenarios,dynamics,compat,enrich}.json  (open dataset, regenerated ~daily)
         (DSH_INSIGHTS_UPSTREAM_BASE overrides all docs to one origin)
         ▲  lazy fetch on first request, in-memory cache, TTL 6h
         │  (failed fetches never poison the cache; concurrent firsts share one in-flight promise)
@@ -45,7 +45,7 @@ isn't data traffic: a local Typert Remote call, see below.)
 
 | Endpoint (GET) | Description |
 |---|---|
-| `/plugin?full_name=owner/repo` | One plugin's health card, trimmed: `full_name/stars/grade/score/dimScores/drops/npm/version/description/url`. Upstream drops are bare code strings; the host enriches them to `{code, sev, label:{zh,en}}` via the health-v5 rule table (`src/host/drops.ts`). 404 `not-in-corpus` when absent. |
+| `/plugin?full_name=owner/repo` | One plugin's health card, trimmed: `full_name/stars/grade/score/dimScores/drops/npm/version/description/url`. Upstream drops are bare code strings; the host enriches them to `{code, sev, label:{zh,en}}` via the health-v5 rule table (`src/host/drops.ts`). The response also carries `similar`: top-5 same-category picks from `enrich.json` (score desc, stars tiebreak, self excluded; empty when no category; a failed enrich fetch degrades to `[]`). 404 `not-in-corpus` when absent. |
 | `/search?q=&limit=20` | Case-insensitive substring match over `full_name` + `description`, ranked by stars desc; compact rows without `dimScores`/`drops`. Limit capped at 50. |
 | `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted, with a `compat` slice attached to hits (`enginesDsh` + the first 3 `dshPeers`, joined from `compat.json` on npm name; a failed compat fetch degrades to no annotation). Comma-separated, capped at 100 names. |
 | `/scenarios` | `scenarios.json`, with each pick annotated by its npm `pkgName` (joined from the corpus on `full_name`, omitted when unknown) so the client can offer copyable install/uninstall commands. |
@@ -161,7 +161,11 @@ Three capability sections, each fetching lazily on first visit (tab order:
    pasted GitHub URL (`parseRepoInput`) → `/plugin` → health card (grade
    badge S 紫/A 绿/B 蓝/C 橙/D 红, score, dimension bars, severity-colored
    deduction list, npm-latest drift hint, link out to
-   `https://dsh-insights.com/p/<owner>/<repo>/`); a bare keyword (no `/`) →
+   `https://dsh-insights.com/p/<owner>/<repo>/`, an install/uninstall action
+   row — copyable `dsh plugin add/remove` command with an「已安装」marker
+   when the plugin is in the inventory, a source-install note + GitHub link
+   when unpublished — and a「相似推荐」section fed by the response's `similar`
+   list, each pick loading its own card on click). A bare keyword (no `/`) →
    `/search`, a debounced (300 ms) corpus search list (grade badge + stars +
    truncated description per row, stale in-flight responses discarded via a
    generation counter), each hit loading its card on click. A
@@ -221,7 +225,9 @@ the runtime-version probe shape, the inventory-entry → npm-name mapping and
 filtering incl. pseudo-entry/link: handling (imported from
 `src/shared/installed.ts`, node type-stripping), the conservative ^/~ range
 check (`src/shared/compat.ts`), the scenarios `pkgName` annotation, the
-查验 input router (`classifyCheckInput` from `src/client/api.ts`),
+查验 input router (`classifyCheckInput` from `src/client/api.ts`), the
+plugin route's `similar` annotation (same-category top 5, self excluded,
+empty without a category) and pkgName passthrough,
 self-check as a library (`runSelfcheck()`: well-built S/100, skeletal
 plugin's full deduction set, write-surface scan kinds, npm
 drift/single/stale, path validation errors) and as a CLI subprocess

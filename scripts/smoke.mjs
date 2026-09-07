@@ -129,11 +129,20 @@ const COMPAT = {
   ],
 }
 
+// enrich.json: per-plugin score/grade/category — feeds the similar picks.
+// beta and gamma tie on score (97) so the stars tiebreak is exercised.
+const ENRICH = [
+  { full_name: 'aaa/dsh-alpha', category: '工具 / 效率', score: 88, grade: 'B', stars: 100 },
+  { full_name: 'bbb/dsh-beta', category: '工具 / 效率', score: 97, grade: 'S', stars: 500 },
+  { full_name: 'ccc/dsh-gamma', category: '工具 / 效率', score: 97, grade: 'S', stars: 300 },
+  { full_name: 'ddd/no-health', category: null, score: null, grade: null, stars: 5 },
+]
+
 // ── fixture upstream ─────────────────────────────────────────────────────────
 
 const fixture = createServer((req, res) => {
   const name = (req.url ?? '').replace(/^\//, '')
-  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT }
+  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT, 'enrich.json': ENRICH }
   if (docs[name]) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(docs[name]))
@@ -363,6 +372,30 @@ await check('unknown plugin -> 404 not-in-corpus', async () => {
   if (status !== 404 || body.error?.code !== 'not-in-corpus') throw new Error(`status ${status}`)
 })
 
+await check('plugin carries pkgName (npm field) + same-category similar picks', async () => {
+  const { status, body } = await getJson('/plugin?full_name=aaa/dsh-alpha')
+  if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
+  if (body.plugin.npm !== 'dsh-alpha') throw new Error(`pkgName passthrough wrong: ${body.plugin.npm}`)
+  const similar = body.similar
+  if (!Array.isArray(similar)) throw new Error('similar missing')
+  // Same category, self excluded, score desc with the stars tiebreak
+  // (beta ★500 and gamma ★300 both score 97).
+  if (similar.map((p) => p.full_name).join(',') !== 'bbb/dsh-beta,ccc/dsh-gamma') {
+    throw new Error(`similar order wrong: ${JSON.stringify(similar)}`)
+  }
+  const first = similar[0]
+  if (first.grade !== 'S' || first.score !== 97 || first.stars !== 500) throw new Error('similar row shape wrong')
+  if (similar.some((p) => p.full_name === 'aaa/dsh-alpha')) throw new Error('self must be excluded')
+})
+
+await check('plugin without a category gets an empty similar list', async () => {
+  const { status, body } = await getJson('/plugin?full_name=ddd/no-health')
+  if (status !== 200) throw new Error(`status ${status}`)
+  if (!Array.isArray(body.similar) || body.similar.length !== 0) {
+    throw new Error(`similar must be []: ${JSON.stringify(body.similar)}`)
+  }
+})
+
 await check('malformed full_name -> 400', async () => {
   const { status, body } = await getJson('/plugin?full_name=' + encodeURIComponent('not a repo'))
   if (status !== 400 || body.error?.code !== 'invalid-query') throw new Error(`status ${status}`)
@@ -548,7 +581,7 @@ await check('dynamics passthrough', async () => {
 await check('health reports cache ages for loaded docs', async () => {
   const { status, body } = await getJson('/health')
   if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
-  for (const name of ['insights', 'scenarios', 'dynamics', 'compat']) {
+  for (const name of ['insights', 'scenarios', 'dynamics', 'compat', 'enrich']) {
     const entry = body.caches?.[name]
     if (!entry?.cached || typeof entry.ageMs !== 'number' || entry.ageMs < 0 || entry.stale) {
       throw new Error(`cache ${name} status wrong: ${JSON.stringify(entry)}`)

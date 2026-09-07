@@ -7,7 +7,8 @@
  *
  * - `GET /dsh-insights/plugin?full_name=owner/repo` — one plugin's health
  *   card (trimmed: full_name/stars/grade/score/dimScores/drops enriched to
- *   code+sev+label/npm/version/description/url); 404 when not in the corpus.
+ *   code+sev+label/npm/version/description/url) plus `similar`: top-5
+ *   same-category picks from enrich.json; 404 when not in the corpus.
  * - `GET /dsh-insights/search?q=<word>&limit=20`   — case-insensitive
  *   substring match over full_name + description, ranked by stars; compact
  *   rows (no dimScores/drops).
@@ -45,6 +46,7 @@ import {
   compatByNpm,
   createStore,
   searchPlugins,
+  similarByCategory,
   trimPlugin,
   type InsightsStore,
 } from './upstream.ts'
@@ -182,7 +184,16 @@ async function handleRequest(
         })
         return
       }
-      sendJson(res, 200, { ok: true, generatedAt: data.generatedAt ?? null, plugin: trimPlugin(plugin) })
+      // Same-category picks from enrich.json (top 5 by score then stars, self
+      // excluded); a failed enrich fetch degrades to an empty list rather
+      // than failing the card.
+      const enrichDoc = await store.enrich().catch(() => null)
+      sendJson(res, 200, {
+        ok: true,
+        generatedAt: data.generatedAt ?? null,
+        plugin: trimPlugin(plugin),
+        similar: similarByCategory(enrichDoc, plugin.full_name),
+      })
       return
     }
     if (pathname === `${PREFIX}/search`) {

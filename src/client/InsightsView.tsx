@@ -51,6 +51,7 @@ import {
   type Scenario,
   type ScenariosDoc,
   type SearchHit,
+  type SimilarPick,
 } from './api.ts'
 import { getInventoryLister, installedPluginNames, npmNameOfModule } from './inventory.ts'
 import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
@@ -558,6 +559,8 @@ interface CheckState {
   state: LoadState
   card?: PluginCard
   generatedAt?: string | null
+  /** Same-category picks served with the card (empty/absent → no section). */
+  similar?: SimilarPick[]
   notInCorpus?: boolean
   error?: unknown
 }
@@ -775,18 +778,47 @@ function CheckSection(props: {
             </div>
           )}
 
-          {result.card && <HealthCard card={result.card} generatedAt={result.generatedAt} />}
+          {result.card && <HealthCard card={result.card} generatedAt={result.generatedAt} similar={result.similar} onPick={pickPlugin} />}
         </>
       )}
     </div>
   )
 }
 
-function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: string | null }): JSX.Element {
+function HealthCard(props: {
+  card: PluginCard
+  generatedAt?: string | null
+  similar?: SimilarPick[]
+  onPick: (fullName: string) => void
+}): JSX.Element {
+  const { card, generatedAt, similar, onPick } = props
   const [owner, repo] = card.full_name.split('/')
   const pageUrl = `${SITE}/p/${owner}/${repo}/`
   const dims = Object.entries(card.dimScores)
   const drift = card.npmLatest && card.version && card.npmLatest !== card.version
+
+  // Installed-plugin names (npm) via the inventory Remote, for the
+  // install/uninstall action. Unavailable/failed enumeration → treat as
+  // not-installed (the plain install command is shown), never an error.
+  const [installedNames, setInstalledNames] = useState<ReadonlySet<string> | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const lister = await getInventoryLister()
+        if (!lister) return
+        const entries = await lister()
+        if (!cancelled) setInstalledNames(new Set(installedPluginNames(entries)))
+      } catch {
+        // silent degradation, see above
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  const installed = card.npm !== null && installedNames?.has(card.npm) === true
+
   return (
     <div style={cardStyle}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10 }}>
@@ -800,6 +832,37 @@ function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: str
             {drift && <span style={{ marginLeft: 10, color: '#ca8a04' }}>npm latest {card.npmLatest}</span>}
           </div>
         </div>
+      </div>
+
+      {/* Install/uninstall actions — read-only: the buttons only copy the
+          `dsh plugin` command to the clipboard. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        {card.npm ? (
+          <>
+            {installed && <span style={installedPillStyle}>{L('已安装', 'Installed')}</span>}
+            <CopyCommandButton
+              command={installed
+                ? `dsh plugin --profile web remove ${card.npm}`
+                : `dsh plugin --profile web add ${card.npm}`}
+              label={installed
+                ? L('复制卸载命令', 'Copy uninstall command')
+                : L('复制安装命令', 'Copy install command')}
+            />
+            <span style={mutedStyle}>
+              {L('复制后在终端执行，重启 dsh web 生效', 'Copied to the clipboard — run in a terminal, then restart `dsh web`')}
+            </span>
+          </>
+        ) : (
+          <span style={mutedStyle}>
+            {L('未发布 npm，需从源码安装', 'Not published to npm — install from source')}
+            {card.url && (
+              <>
+                {' · '}
+                <a href={card.url} target="_blank" rel="noreferrer" style={{ color: '#2563eb' }}>GitHub ↗</a>
+              </>
+            )}
+          </span>
+        )}
       </div>
 
       {card.description && <div style={{ marginBottom: 10 }}>{card.description}</div>}
@@ -849,6 +912,42 @@ function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: str
           </span>
         )}
       </div>
+
+      {similar && similar.length > 0 && (
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--border, #eef1f4)', paddingTop: 10 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 12 }}>
+            {L('相似推荐', 'Similar picks')}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+            {similar.map((pick) => (
+              <li key={pick.full_name}>
+                <button
+                  onClick={() => onPick(pick.full_name)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    width: '100%',
+                    textAlign: 'left',
+                    border: 'none',
+                    background: 'none',
+                    padding: '4px 0',
+                    cursor: 'pointer',
+                    color: 'inherit',
+                    fontSize: 13,
+                  }}
+                  title={L('加载该插件的健康卡', 'Load this plugin\'s health card')}
+                >
+                  <GradeBadge grade={pick.grade} />
+                  <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{pick.full_name}</span>
+                  {pick.score !== null && <span style={mutedStyle}>{pick.score}</span>}
+                  <Stars n={pick.stars} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }
@@ -1040,7 +1139,7 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
   function runCheck(fullName: string): void {
     setCheck({ state: 'loading' })
     fetchPlugin(fullName)
-      .then((res) => setCheck({ state: 'ready', card: res.plugin, generatedAt: res.generatedAt }))
+      .then((res) => setCheck({ state: 'ready', card: res.plugin, generatedAt: res.generatedAt, similar: res.similar ?? [] }))
       .catch((error: unknown) => {
         if (error instanceof ApiError && error.code === 'not-in-corpus') {
           setCheck({ state: 'ready', notInCorpus: true })

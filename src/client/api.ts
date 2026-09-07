@@ -155,8 +155,18 @@ async function getJson<T>(query: string): Promise<T> {
   return body as unknown as T
 }
 
+/** One same-category pick attached to the plugin health card. */
+export interface SimilarPick {
+  full_name: string
+  grade: string | null
+  score: number | null
+  stars: number
+}
+
 /** Fetch one plugin's health card; throws ApiError code `not-in-corpus` when absent. */
-export async function fetchPlugin(fullName: string): Promise<{ generatedAt: string | null; plugin: PluginCard }> {
+export async function fetchPlugin(
+  fullName: string,
+): Promise<{ generatedAt: string | null; plugin: PluginCard; similar?: SimilarPick[] }> {
   return getJson(`plugin?full_name=${encodeURIComponent(fullName)}`)
 }
 

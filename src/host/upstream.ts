@@ -10,6 +10,7 @@
  * - `scenarios.json` (scenario → recommended plugins)
  * - `dynamics.json`  (dsh releases + platform repo activity)
  * - `compat.json`    (per-plugin engines.dsh / dsh-peer compat signals)
+ * - `enrich.json`    (per-plugin score/grade/category — same-category picks)
  *
  * The store is dependency-injected (`fetchJson`, `baseUrl`, `ttlMs`) so the
  * smoke test can run it against a local fixture server with no network.
@@ -33,6 +34,7 @@ const DEFAULT_DOC_URLS: Record<string, string> = {
   scenarios: `${DEFAULT_BASE_URL}/scenarios.json`,
   dynamics: `${DEFAULT_BASE_URL}/dynamics.json`,
   compat: `${DEFAULT_BASE_URL}/compat.json`,
+  enrich: `${DEFAULT_BASE_URL}/enrich.json`,
 }
 
 // ── upstream wire shapes (only the fields this plugin reads) ─────────────────
@@ -109,6 +111,51 @@ export function compatByNpm(doc: unknown): Map<string, CompatInfo> {
     })
   }
   return map
+}
+
+// ── enrich.json (per-plugin score/grade/category — same-category picks) ──────
+
+export interface EnrichRow {
+  full_name?: string
+  category?: string | null
+  score?: number | null
+  grade?: string | null
+  stars?: number
+}
+
+/** Compact row for the「相似推荐」section of the plugin health card. */
+export interface SimilarPick {
+  full_name: string
+  grade: string | null
+  score: number | null
+  stars: number
+}
+
+/**
+ * Same-category recommendations for one plugin (mirrors the site's /p/ page
+ * logic, ranked by score desc then stars desc): the top `limit` enrich rows
+ * sharing the plugin's category, excluding the plugin itself. Empty when the
+ * plugin has no category or no siblings.
+ */
+export function similarByCategory(doc: unknown, fullName: string, limit = 5): SimilarPick[] {
+  const rows: EnrichRow[] = Array.isArray(doc)
+    ? doc as EnrichRow[]
+    : Array.isArray((doc as { plugins?: EnrichRow[] } | null)?.plugins)
+      ? (doc as { plugins: EnrichRow[] }).plugins
+      : []
+  const target = fullName.toLowerCase()
+  const self = rows.find((r) => r.full_name?.toLowerCase() === target)
+  if (!self || typeof self.category !== 'string' || !self.category) return []
+  return rows
+    .filter((r) => r.category === self.category && r.full_name && r.full_name.toLowerCase() !== target)
+    .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || (b.stars ?? 0) - (a.stars ?? 0))
+    .slice(0, limit)
+    .map((r) => ({
+      full_name: r.full_name!,
+      grade: typeof r.grade === 'string' ? r.grade : null,
+      score: typeof r.score === 'number' ? r.score : null,
+      stars: typeof r.stars === 'number' ? r.stars : 0,
+    }))
 }
 
 // ── trimmed shapes served to the browser ─────────────────────────────────────
@@ -244,7 +291,7 @@ export async function defaultFetchJson(url: string): Promise<unknown> {
   }
 }
 
-type CacheName = 'insights' | 'scenarios' | 'dynamics' | 'compat'
+type CacheName = 'insights' | 'scenarios' | 'dynamics' | 'compat' | 'enrich'
 
 interface CacheEntry {
   data: unknown
@@ -270,6 +317,7 @@ export interface InsightsStore {
   scenarios(): Promise<unknown>
   dynamics(): Promise<unknown>
   compat(): Promise<unknown>
+  enrich(): Promise<unknown>
   status(): Record<CacheName, CacheStatus>
 }
 
@@ -316,8 +364,9 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
     scenarios: () => load('scenarios'),
     dynamics: () => load('dynamics'),
     compat: () => load('compat'),
+    enrich: () => load('enrich'),
     status() {
-      const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat']
+      const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat', 'enrich']
       const out = {} as Record<CacheName, CacheStatus>
       for (const name of names) {
         const hit = cache.get(name)
