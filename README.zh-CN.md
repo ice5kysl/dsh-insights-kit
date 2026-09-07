@@ -6,12 +6,12 @@
 
 > 装插件前想知道它健不健康，但今天要离开 dsh、打开浏览器、手动去网站上找。
 
-这个插件把答案**搬进会话里**，成为会话标题栏的新 tab——对话 | 轨迹 | 生态：
+这个插件把答案**搬进 dsh Web**：侧栏底部常驻一个 ✦ 按钮，点击打开「生态」面板（覆盖在应用之上的右侧抽屉），内含三个能力页签：
 
+- **体检**——通过官方 `pluginInventory` Remote（Cordis Loader 实时状态）**枚举你已安装的插件**并批量体检：每个插件显示等级徽章 + 分数，顶部 S/A/B/C/D 汇总条，**npm 版本漂移提醒**（npm latest ≠ 仓库版本），低分（C/D）行附「同类更优替代 ↗」链接——另有 **BREAKING 变更预警卡**，提示官方 dsh release 可能需要插件适配。若当前构建未开放枚举网关，则优雅降级为**版本与兼容性提醒**页（dist-tags、标红 BREAKING 的最近 releases、建议动作）。
 - **查验**——输入 `owner/repo` **或直接粘贴 GitHub URL**；得到健康卡：大等级徽章（S 紫 / A 绿 / B 蓝 / C 橙 / D 红）、0–100 分数、四维子分条（工程/文档/可发现/维护）、带严重级别的扣分明细，以及「在 dsh-insights.com 查看完整页 ↗」链接。未收录的仓库会明确提示**「不在权威集」**，而不是编造分数。
 - **场景**——按使用场景浏览推荐插件（名称/等级/一句话理由）；点任意插件直接跳到「查验」并加载它的健康卡。
-- **动态**——dsh 官方 release 列表（含 **BREAKING** 标记）+ 平台仓库动态（DeepSeek-V3/R1 等：星数、最新 release、最近 push）。
-- **中英双语 UI**：按浏览器语言自动判断（zh → 中文，其余 → 英文）；顶栏「中 / EN」按钮随时切换并记住偏好。
+- **中英双语 UI**：按浏览器语言自动判断（zh → 中文，其余 → 英文）；面板顶栏「中 / EN」按钮随时切换并记住偏好。
 
 ## 为什么需要 host 面路由（设计说明）
 
@@ -21,6 +21,7 @@
 |---|---|
 | `/dsh-insights/plugin?full_name=owner/repo` | 单插件健康卡（修剪字段：`full_name/stars/grade/score/dimScores/drops/npm/version/description/url`）；上游扣分码补全为 `{code, sev, label}`；未收录返回 404 `not-in-corpus` |
 | `/dsh-insights/search?q=&limit=20` | `full_name` + `description` 子串匹配（大小写不敏感），按 stars 排序；紧凑行（不含 `dimScores`/`drops`） |
+| `/dsh-insights/audit?npm=a,b,c` | 按 npm 包名批量查健康卡（「体检」页用）：每个名字 → 修剪卡或 null（未收录） |
 | `/dsh-insights/scenarios` | `scenarios.json` 透传 |
 | `/dsh-insights/dynamics` | `dynamics.json` 透传 |
 | `/dsh-insights/health` | 探活 + 各文档缓存年龄 |
@@ -48,11 +49,11 @@ npm install && npm run build
 bash scripts/install-personal.sh   # 等价于 dsh plugin --profile web add <本目录>
 ```
 
-然后重启 `dsh web` 并刷新浏览器（http://127.0.0.1:3080），会话标题栏即出现「生态」tab。
+然后重启 `dsh web` 并刷新浏览器（http://127.0.0.1:3080），侧栏底部出现 ✦ 生态按钮，点击即打开面板。
 
 ## 截图
 
-| 查验 | 场景 | 动态 |
+| 体检 | 查验 | 场景 |
 |---|---|---|
 | _（截图占位）_ | _（截图占位）_ | _（截图占位）_ |
 

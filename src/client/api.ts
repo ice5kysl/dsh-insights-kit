@@ -31,6 +31,7 @@ export interface PluginCard {
   drops: DropInfo[]
   npm: string | null
   version: string | null
+  npmLatest: string | null
   description: string | null
 }
 
@@ -98,6 +99,11 @@ export interface DynamicsDoc {
     pushed_at?: string
     description?: string
     releases?: ReleaseRow[]
+    npm?: {
+      pkg?: string
+      distTags?: Record<string, string>
+      versions?: Array<{ version?: string; time?: string }>
+    }
   }
   platform?: PlatformRepo[]
 }
@@ -153,6 +159,13 @@ export async function fetchScenarios(): Promise<{ scenarios: ScenariosDoc }> {
 
 export async function fetchDynamics(): Promise<{ dynamics: DynamicsDoc }> {
   return getJson('dynamics')
+}
+
+/** Batch health lookup by npm package names; unlisted names map to null. */
+export async function fetchAudit(
+  names: readonly string[],
+): Promise<{ generatedAt: string | null; results: Record<string, PluginCard | null> }> {
+  return getJson(`audit?npm=${encodeURIComponent(names.join(','))}`)
 }
 
 /**

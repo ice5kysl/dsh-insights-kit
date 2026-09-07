@@ -72,7 +72,10 @@ export interface TrimmedPlugin {
   drops: DropInfo[]
   /** npm package name (repo package.json `name`), when known. */
   npm: string | null
+  /** Repo package.json `version` (falling back to npm latest when unknown). */
   version: string | null
+  /** npm registry `latest` dist-tag, when published (drives the drift hint). */
+  npmLatest: string | null
   description: string | null
 }
 
@@ -99,6 +102,7 @@ export function trimPlugin(p: UpstreamPlugin): TrimmedPlugin {
     drops: enrichDrops(p.health?.drops ?? []),
     npm: p.pkgName ?? null,
     version: p.version ?? p.npm?.latest ?? null,
+    npmLatest: p.npm?.latest ?? null,
     description: p.description ?? null,
   }
 }
@@ -134,6 +138,31 @@ export function searchPlugins(
   )
   matched.sort((a, b) => (b.stars ?? 0) - (a.stars ?? 0) || a.full_name.localeCompare(b.full_name))
   return { total: matched.length, results: matched.slice(0, limit).map(trimSearchHit) }
+}
+
+/**
+ * Batch health lookup keyed by npm package name (the「我的插件体检」route):
+ * for each requested name, the trimmed card of the corpus row whose
+ * `pkgName` matches (case-insensitively), or null when unlisted. Names are
+ * lowercased/trimmed/deduped by the caller's map semantics — the last
+ * duplicate wins identically, so this is order-independent.
+ */
+export function auditByNpm(
+  plugins: readonly UpstreamPlugin[],
+  names: readonly string[],
+): Record<string, TrimmedPlugin | null> {
+  const byNpm = new Map<string, UpstreamPlugin>()
+  for (const p of plugins) {
+    if (p.pkgName) byNpm.set(p.pkgName.toLowerCase(), p)
+  }
+  const out: Record<string, TrimmedPlugin | null> = {}
+  for (const raw of names) {
+    const name = raw.trim().toLowerCase()
+    if (!name) continue
+    const hit = byNpm.get(name)
+    out[raw.trim()] = hit ? trimPlugin(hit) : null
+  }
+  return out
 }
 
 // ── cached store ─────────────────────────────────────────────────────────────

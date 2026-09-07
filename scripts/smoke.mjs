@@ -15,6 +15,7 @@
 
 import { createServer, request as httpRequest } from 'node:http'
 import { apply } from '../lib/index.js'
+import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,7 @@ const INSIGHTS = {
       topics: ['dsh-plugin'],
       pkgName: 'dsh-alpha',
       version: '1.0.0',
+      npm: { published: true, latest: '1.2.0' },
       description: 'File explorer for dsh workspaces',
       health: {
         score: 88,
@@ -173,7 +175,7 @@ await check('plugin returns trimmed card with enriched drops', async () => {
   if (p.full_name !== 'aaa/dsh-alpha' || p.stars !== 100 || p.grade !== 'B' || p.score !== 88) {
     throw new Error('core fields wrong')
   }
-  if (p.npm !== 'dsh-alpha' || p.version !== '1.0.0' || !p.description || !p.url) throw new Error('trimmed fields wrong')
+  if (p.npm !== 'dsh-alpha' || p.version !== '1.0.0' || p.npmLatest !== '1.2.0' || !p.description || !p.url) throw new Error('trimmed fields wrong')
   if (p.dimScores?.eng !== 88) throw new Error('dimScores missing')
   if (!Array.isArray(p.drops) || p.drops.length !== 2) throw new Error('drops not enriched')
   const [major, minor] = p.drops
@@ -232,8 +234,58 @@ await check('empty search query -> 400', async () => {
   if (status !== 400) throw new Error(`status ${status}`)
 })
 
-await check('scenarios passthrough', async () => {
-  const { status, body } = await getJson('/scenarios')
+await check('audit maps known npm names to cards, unknown to null', async () => {
+  const { status, body } = await getJson('/audit?npm=' + encodeURIComponent('dsh-alpha,dsh-beta,unknown-pkg'))
+  if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
+  const alpha = body.results['dsh-alpha']
+  if (!alpha || alpha.full_name !== 'aaa/dsh-alpha' || alpha.grade !== 'B') throw new Error('alpha card wrong')
+  if (alpha.npmLatest !== '1.2.0' || !Array.isArray(alpha.drops)) throw new Error('alpha card shape wrong')
+  const beta = body.results['dsh-beta']
+  if (!beta || beta.full_name !== 'bbb/dsh-beta' || beta.grade !== 'S') throw new Error('beta card wrong')
+  if (body.results['unknown-pkg'] !== null) throw new Error('unknown name must map to null')
+})
+
+await check('audit is case-insensitive on npm names', async () => {
+  const { body } = await getJson('/audit?npm=DSH-Alpha')
+  if (!body.results['DSH-Alpha'] || body.results['DSH-Alpha'].full_name !== 'aaa/dsh-alpha') {
+    throw new Error('case-insensitive lookup failed')
+  }
+})
+
+await check('audit without names -> 400', async () => {
+  const { status, body } = await getJson('/audit?npm=')
+  if (status !== 400 || body.error?.code !== 'invalid-query') throw new Error(`status ${status}`)
+})
+
+await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {
+  const cases = [
+    ['dsh-file-explorer-kit', 'dsh-file-explorer-kit'],
+    ['@dsh-external/dsh-super-injector', '@dsh-external/dsh-super-injector'],
+    ['dsh-foo/sub/path', 'dsh-foo'],
+    ['/Users/x/Code/Labs/dsh/dsh-insights-kit', 'dsh-insights-kit'],
+    ['../relative/dsh-bar', 'dsh-bar'],
+    ['C:\\Users\\x\\dsh-baz', 'dsh-baz'],
+  ]
+  for (const [input, expected] of cases) {
+    const got = npmNameOfModule(input)
+    if (got !== expected) throw new Error(`npmNameOfModule(${input}) = ${got}, want ${expected}`)
+  }
+})
+
+await check('installedPluginNames filters official/disabled, dedupes, sorts', async () => {
+  const names = installedPluginNames([
+    { moduleName: '@deepseek-ai/dsh-client-runtime', enabled: true },
+    { moduleName: 'dsh-file-explorer-kit', enabled: true },
+    { moduleName: '/opt/local/dsh-workspace-kit', enabled: true },
+    { moduleName: 'dsh-file-explorer-kit', enabled: true },
+    { moduleName: 'dsh-disabled-one', enabled: false },
+    { moduleName: 'aaa-first', enabled: true },
+  ])
+  const want = 'aaa-first,dsh-file-explorer-kit,dsh-workspace-kit'
+  if (names.join(',') !== want) throw new Error(`got ${names.join(',')}, want ${want}`)
+})
+
+await check('scenarios passthrough', async () => {  const { status, body } = await getJson('/scenarios')
   if (status !== 200 || body.scenarios?.scenarios?.[0]?.id !== 'session-archive') throw new Error(`status ${status}`)
 })
 

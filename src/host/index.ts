@@ -11,6 +11,8 @@
  * - `GET /dsh-insights/search?q=<word>&limit=20`   — case-insensitive
  *   substring match over full_name + description, ranked by stars; compact
  *   rows (no dimScores/drops).
+ * - `GET /dsh-insights/audit?npm=a,b,c` — batch health lookup by npm package
+ *   name (the「我的插件体检」page); each name maps to a trimmed card or null.
  * - `GET /dsh-insights/scenarios` — scenarios.json passthrough.
  * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
@@ -21,8 +23,9 @@
  * server (bind 127.0.0.1 by default; keep the dsh web server loopback-bound
  * in deployments).
  *
- * Browser face (`./client`): the「生态」session view tab (see src/client). It
- * consumes these routes with same-origin `fetch`.
+ * Browser face (`./client`): the「生态」overlay panel opened from a sidebar
+ * footer action (see src/client). It consumes these routes with same-origin
+ * `fetch`.
  *
  * @module dsh-insights-kit
  */
@@ -30,6 +33,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   UpstreamError,
+  auditByNpm,
   createStore,
   searchPlugins,
   trimPlugin,
@@ -61,6 +65,7 @@ interface HostCtxLike {
 
 const PREFIX = '/dsh-insights'
 const MAX_SEARCH_LIMIT = 50
+const MAX_AUDIT_NAMES = 100
 const startedAt = Date.now()
 
 interface WireError {
@@ -88,7 +93,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,scenarios,dynamics,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,health} (read-only)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -143,6 +148,27 @@ async function handleRequest(
       sendJson(res, 200, { ok: true, q, total, limit, results })
       return
     }
+    if (pathname === `${PREFIX}/audit`) {
+      // Batch health lookup by npm package names (comma-separated), for the
+      //「我的插件体检」page: each name maps to a trimmed card or null
+      // (unlisted). Cap keeps the query string and the scan bounded.
+      const names = (url.searchParams.get('npm') ?? '')
+        .split(',')
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+        .slice(0, MAX_AUDIT_NAMES)
+      if (names.length === 0) {
+        sendJson(res, 400, { ok: false, error: wireError('invalid-query', 'missing ?npm=name1,name2,…') })
+        return
+      }
+      const data = await store.insights()
+      sendJson(res, 200, {
+        ok: true,
+        generatedAt: data.generatedAt ?? null,
+        results: auditByNpm(data.plugins, names),
+      })
+      return
+    }
     if (pathname === `${PREFIX}/scenarios`) {
       sendJson(res, 200, { ok: true, scenarios: await store.scenarios() })
       return
@@ -167,6 +193,7 @@ async function handleRequest(
         endpoints: [
           '/dsh-insights/plugin?full_name=owner/repo',
           '/dsh-insights/search?q=&limit=',
+          '/dsh-insights/audit?npm=a,b,c',
           '/dsh-insights/scenarios',
           '/dsh-insights/dynamics',
           '/dsh-insights/health',

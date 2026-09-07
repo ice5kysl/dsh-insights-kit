@@ -1,13 +1,20 @@
 /**
  * dsh-insights-kit — browser (client) face.
  *
- * One registration on the official additive seam:
+ * Two registrations, both official additive seams:
  *
- * `conversation.view` (list/session) — a「生态」view tab registered after the
- * shipped chat (order 0) and trajectory (order 10) tabs, at order 30, so the
- * session header reads 对话 | 轨迹 | … | 生态. While the tab is active the
- * session body becomes the DSH Insights assistant (查验 / 场景 / 动态);
- * switching tabs or sessions unmounts it.
+ * - `sidebar.footer.action` (list/root) — an always-visible footer button
+ *   that opens the「生态」panel (via a window event; slot components share
+ *   no ctx).
+ * - `shell.overlay` (list/root) — the panel itself: a right-side drawer over
+ *   the app (click-through until it opts into pointer events), hosting the
+ *   three capability sections 体检 / 查验 / 场景.
+ *
+ * Also mounts the official `pluginInventory` Remote contribution on
+ * `ctx.remote` so the 体检 section can enumerate installed plugins; the
+ * mount is best-effort (builds without the inventory gateway degrade the
+ * 体检 page to the version/compatibility reminder form, never breaking the
+ * rest of the panel).
  *
  * The same Loader entry carries the host face (`lib/index.js`, the
  * /dsh-insights routes), so this module ships as the package's `./client`
@@ -17,11 +24,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { L } from './locale.ts'
-import { InsightsView } from './InsightsView.tsx'
+import { InsightsPanel } from './InsightsView.tsx'
+import { mountInventory, setInventoryLister, type RemoteLike } from './inventory.ts'
+import { SidebarAction } from './SidebarAction.tsx'
 
 export const name = 'insights'
-export const inject = ['slots'] as const
+export const inject = ['slots', 'remote'] as const
 
 /** Minimal service faces this plugin consumes (typed locally at the boundary). */
 interface SlotsLike {
@@ -34,27 +42,31 @@ interface SlotsLike {
 interface ClientCtxLike {
   logger(name: string): { info(...parts: unknown[]): void }
   slots: SlotsLike
+  remote: RemoteLike
 }
 
 export function apply(raw: Context): void {
   const ctx = raw as unknown as ClientCtxLike
   const log = ctx.logger('insights:client')
 
-  // The「生态」view tab: order 30 renders after the shipped chat (0) and
-  // trajectory (10) tabs and the file-explorer kit (20) when present; the
-  // header tab strip lists conversation.view entries automatically, and the
-  // body renders only the active entry (官方 `only: <active id>` 机制).
-  ctx.slots.inject('conversation.view', () =>
+  // Best-effort inventory mount: slot components get no ctx, so stash the
+  // promise for the 体检 section (null = enumeration unavailable → degraded
+  // page). Never blocks the panel's other sections.
+  setInventoryLister(mountInventory(ctx.remote))
+
+  ctx.slots.inject('sidebar.footer.action', () =>
     ctx.slots.register(
-      {
-        name: 'conversation.view',
-        id: 'insights',
-        order: 30,
-        label: () => L('生态', 'Ecosystem'),
-      },
-      InsightsView,
+      { name: 'sidebar.footer.action', id: 'insights-kit.action', order: 10 },
+      SidebarAction,
     ),
   )
 
-  log.info('DSH Insights registered as session view tab (对话 | 轨迹 | 生态)')
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      { name: 'shell.overlay', id: 'insights-kit.panel', order: 100 },
+      InsightsPanel,
+    ),
+  )
+
+  log.info('DSH Insights client ready (sidebar footer action + overlay panel)')
 }

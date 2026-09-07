@@ -1,21 +1,26 @@
 /**
- * dsh-insights-kit — the「生态」session view tab (browser face).
+ * dsh-insights-kit — the「生态」overlay panel (browser face).
  *
- * Registers into the official `conversation.view` list slot (session scope),
- * so the session header grows a tab — 对话 | 轨迹 | 生态 (Chat | Trajectory |
- * Ecosystem) — ordered after the shipped entries. The body carries three
- * sub-sections, switched by an inner tab strip (a single scroll page was
- * considered; three focused sub-tabs mirror the host shell's own tab idiom
- * and keep each dataset's fetch lazy):
+ * Registered into the official `shell.overlay` list slot (root scope): the
+ * component stays mounted and renders nothing until the sidebar footer
+ * action (or its window event) opens it, then draws a right-side drawer over
+ * the app — the shell.overlay contract is additive and click-through until
+ * an entry opts into pointer events, which the backdrop/drawer do while
+ * open. Escape or a backdrop click closes it.
  *
- * 1. 查验 Check      — paste `owner/repo` or a GitHub URL, get the plugin's
- *    DSH Insights health card: grade badge (S/A/B/C/D), score, the four
- *    dimension bars, the deduction list, and a link out to the full page on
- *    dsh-insights.com. Unknown repos get a「不在权威集」notice.
- * 2. 场景 Scenarios  — scenario → recommended plugins (name/grade/one-liner);
- *    clicking a plugin jumps to the Check section with it loaded.
- * 3. 动态 Dynamics   — dsh official releases (breaking flagged) + platform
- *    repo activity.
+ * Three capability sections, switched by an inner tab strip:
+ *
+ * 1. 体检 Audit      — enumerates installed plugins through the official
+ *    pluginInventory Remote, health-checks them against the corpus in one
+ *    batch (grade badge + score per row, S/A/B/C/D summary bar, npm
+ *    version-drift hints, C/D rows link to on-site alternatives), plus a
+ *    BREAKING-release warning card. Builds without the inventory gateway
+ *    get the degraded form: dist-tags + breaking releases + advised actions.
+ * 2. 查验 Check      — paste `owner/repo` or a GitHub URL, get the plugin's
+ *    health card (grade badge, score, dimension bars, deduction list, link
+ *    out to the full page on dsh-insights.com).
+ * 3. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
+ *    jumps to Check with it loaded.
  *
  * All data flows through the host `/dsh-insights` surface; the client never
  * talks to dsh-insights.com directly. Bilingual zh/en with the same toggle
@@ -27,6 +32,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   ApiError,
+  fetchAudit,
   fetchDynamics,
   fetchPlugin,
   fetchScenarios,
@@ -34,19 +40,15 @@ import {
   type DynamicsDoc,
   type DropSeverity,
   type PluginCard,
+  type ReleaseRow,
   type Scenario,
   type ScenariosDoc,
 } from './api.ts'
+import { getInventoryLister, installedPluginNames } from './inventory.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
+import { PANEL_EVENT } from './SidebarAction.tsx'
 
-/** Selector-shaped hooks the shell's standard kit passes to session views. */
-export interface InsightsViewProps {
-  sessionId?: string
-  useSessions?: <T>(selector: (state: any) => T) => T
-  useWorkspaces?: <T>(selector: (state: any) => T) => T
-}
-
-type Section = 'check' | 'scenarios' | 'dynamics'
+type Section = 'audit' | 'check' | 'scenarios'
 type LoadState = 'idle' | 'loading' | 'error' | 'ready'
 
 const SITE = 'https://dsh-insights.com'
@@ -74,22 +76,15 @@ const DIM_LABELS: Record<string, { zh: string; en: string }> = {
   maint: { zh: '维护', en: 'Maintenance' },
 }
 
-// ── style atoms (inline, matching the host shell's plain look) ───────────────
+const GRADE_ORDER = ['S', 'A', 'B', 'C', 'D'] as const
 
-const pageStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  height: '100%',
-  minHeight: 0,
-  fontSize: 13,
-  color: 'var(--fg, #1f2328)',
-}
+// ── style atoms (inline, matching the host shell's plain look) ───────────────
 
 const headerStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 8,
-  padding: '8px 12px',
+  padding: '10px 14px',
   borderBottom: '1px solid var(--border, #e2e5e9)',
   flexShrink: 0,
 }
@@ -180,6 +175,235 @@ function ErrorNote({ error }: { error: unknown }): JSX.Element {
   return <div style={{ ...cardStyle, borderColor: '#dc2626', color: '#dc2626' }}>{text}</div>
 }
 
+/** Shared breaking-release warning card (both audit forms). */
+function BreakingCard({ releases }: { releases: readonly ReleaseRow[] }): JSX.Element | null {
+  const breaking = releases.filter((rel) => rel.breaking).slice(0, 3)
+  if (breaking.length === 0) return null
+  return (
+    <div style={{ ...cardStyle, borderColor: '#dc2626' }}>
+      <div style={{ fontWeight: 700, color: '#dc2626', marginBottom: 6 }}>
+        {L('dsh 官方 BREAKING 变更预警', 'Official dsh BREAKING-change alert')}
+      </div>
+      <ul style={{ margin: '0 0 6px', paddingLeft: 0, listStyle: 'none' }}>
+        {breaking.map((rel) => (
+          <li key={rel.tag} style={{ padding: '2px 0' }}>
+            <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px', marginRight: 6 }}>BREAKING</span>
+            <code style={{ fontWeight: 700 }}>{rel.name ?? rel.tag}</code>
+            <span style={{ ...mutedStyle, marginLeft: 6 }}>{(rel.published_at ?? '').slice(0, 10)}</span>
+            {rel.summary && <div style={{ ...mutedStyle, marginTop: 2 }}>{rel.summary}</div>}
+          </li>
+        ))}
+      </ul>
+      <div style={mutedStyle}>
+        {L(
+          '升级 dsh 前，已装插件可能需要适配这些变更——建议先逐个查验健康分与维护状态。',
+          'Installed plugins may need to adapt to these changes before you upgrade dsh — check each plugin\'s health and maintenance state first.',
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** dist-tag chips (latest/alpha/next), shown in both audit forms. */
+function DistTags({ tags }: { tags: Record<string, string> | undefined }): JSX.Element | null {
+  if (!tags || Object.keys(tags).length === 0) return null
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+      {Object.entries(tags).map(([tag, version]) => (
+        <span key={tag} style={{ ...mutedStyle, border: '1px solid var(--border, #e2e5e9)', borderRadius: 6, padding: '2px 8px' }}>
+          {tag}: <code>{version}</code>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ── section: 体检 Audit ──────────────────────────────────────────────────────
+
+type AuditForm = 'loading' | 'full' | 'degraded' | 'error'
+
+interface AuditState {
+  form: AuditForm
+  rows?: Array<{ name: string; card: PluginCard | null }>
+  dynamics?: DynamicsDoc
+  error?: unknown
+}
+
+function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Element {
+  const { onPick } = props
+  const [audit, setAudit] = useState<AuditState>({ form: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      // dynamics feeds both forms (breaking card + dist-tags); tolerate its
+      // failure so the audit list still renders.
+      const dynamics = await fetchDynamics()
+        .then((res) => res.dynamics)
+        .catch(() => undefined)
+      const lister = await getInventoryLister()
+      if (!lister) {
+        if (!cancelled) setAudit({ form: 'degraded', dynamics })
+        return
+      }
+      try {
+        const entries = await lister()
+        const names = installedPluginNames(entries)
+        if (names.length === 0) {
+          if (!cancelled) setAudit({ form: 'full', rows: [], dynamics })
+          return
+        }
+        const res = await fetchAudit(names)
+        const rows = names.map((name) => ({ name, card: res.results[name] ?? null }))
+        if (!cancelled) setAudit({ form: 'full', rows, dynamics })
+      } catch (error) {
+        if (!cancelled) setAudit({ form: 'degraded', dynamics, error })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (audit.form === 'loading') return <div style={mutedStyle}>{L('正在枚举已装插件并体检…', 'Enumerating installed plugins and auditing…')}</div>
+
+  const releases = audit.dynamics?.dsh?.releases ?? []
+  const distTags = audit.dynamics?.dsh?.npm?.distTags
+
+  if (audit.form === 'degraded') {
+    return (
+      <div>
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {L('此 dsh 构建无法枚举已装插件', 'This dsh build cannot enumerate installed plugins')}
+          </div>
+          <div style={mutedStyle}>
+            {L(
+              '当前构建未开放 pluginInventory Remote（或挂载失败），「体检」降级为版本与兼容性提醒。以下为 dsh 官方发布动态——升级前建议在「查验」页逐个检查已装插件的健康分与维护状态。',
+              'The running build does not expose the pluginInventory Remote (or the mount failed), so Audit falls back to version & compatibility reminders. Below are the official dsh release dynamics — before upgrading, check each installed plugin\'s health and maintenance state on the Check tab.',
+            )}
+          </div>
+        </div>
+        <DistTags tags={distTags} />
+        <BreakingCard releases={releases} />
+        <div style={cardStyle}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('最近 releases', 'Recent releases')}</div>
+          <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+            {releases.slice(0, 5).map((rel) => (
+              <li key={rel.tag} style={{ padding: '4px 0', borderTop: '1px solid var(--border, #eef1f4)' }}>
+                <code style={{ fontWeight: 700 }}>{rel.name ?? rel.tag}</code>
+                {rel.breaking && (
+                  <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px', marginLeft: 6 }}>BREAKING</span>
+                )}
+                <span style={{ ...mutedStyle, marginLeft: 6 }}>{(rel.published_at ?? '').slice(0, 10)}</span>
+                {rel.summary && <div style={{ ...mutedStyle, marginTop: 2 }}>{rel.summary}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    )
+  }
+
+  if (audit.form === 'error') return <ErrorNote error={audit.error} />
+
+  const rows = audit.rows ?? []
+  const listed = rows.filter((row) => row.card !== null)
+  const counts: Record<string, number> = {}
+  for (const row of listed) {
+    const grade = (row.card?.grade ?? '?').toUpperCase()
+    counts[grade] = (counts[grade] ?? 0) + 1
+  }
+  const unlisted = rows.length - listed.length
+
+  return (
+    <div>
+      <DistTags tags={distTags} />
+      <BreakingCard releases={releases} />
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+        {GRADE_ORDER.map((grade) => (
+          <span key={grade} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <GradeBadge grade={grade} />
+            <span style={mutedStyle}>× {counts[grade] ?? 0}</span>
+          </span>
+        ))}
+        {unlisted > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <GradeBadge grade={null} />
+            <span style={mutedStyle}>{L('未收录 × {n}', 'unlisted × {n}', { n: unlisted })}</span>
+          </span>
+        )}
+      </div>
+
+      {rows.length === 0 && (
+        <div style={cardStyle}>
+          <div style={mutedStyle}>
+            {L(
+              '未发现第三方已装插件（官方 @deepseek-ai/* 基线不计入体检）。',
+              'No third-party installed plugins found (the official @deepseek-ai/* baseline is not audited).',
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={cardStyle}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>
+          {L('已装插件（{n}）', 'Installed plugins ({n})', { n: rows.length })}
+        </div>
+        <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+          {rows.map((row) => {
+            const card = row.card
+            if (!card) {
+              return (
+                <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
+                  <GradeBadge grade={null} />
+                  <code style={{ fontWeight: 600 }}>{row.name}</code>
+                  <span style={mutedStyle}>{L('未收录（不在权威集）', 'unlisted (not in the corpus)')}</span>
+                </li>
+              )
+            }
+            const [owner, repo] = card.full_name.split('/')
+            const drift = card.npmLatest && card.version && card.npmLatest !== card.version
+            const low = card.grade === 'C' || card.grade === 'D'
+            return (
+              <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
+                <GradeBadge grade={card.grade} />
+                <button
+                  onClick={() => onPick(card.full_name)}
+                  style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 600, fontSize: 13, wordBreak: 'break-all', textAlign: 'left' }}
+                  title={L('在「查验」页打开健康卡', 'Open the health card on the Check tab')}
+                >
+                  {card.full_name}
+                </button>
+                {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
+                <Stars n={card.stars} />
+                {drift && (
+                  <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
+                    title={L('npm latest 与仓库版本不一致，可能有新版本', 'npm latest differs from the repo version — an update may be available')}>
+                    npm {card.npmLatest}
+                  </span>
+                )}
+                {low && (
+                  <a href={`${SITE}/p/${owner}/${repo}/`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 12 }}>
+                    {L('同类更优替代 ↗', 'better alternatives ↗')}
+                  </a>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+      </div>
+      <div style={mutedStyle}>
+        {L(
+          '枚举来源：官方 pluginInventory Remote（Cordis Loader 实时状态）；健康分来自 dsh-insights.com 权威集（客观启发式信号，非安全审计）。',
+          'Enumeration source: the official pluginInventory Remote (live Cordis Loader state); health scores from the dsh-insights.com corpus (objective heuristic signals, not a security audit).',
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── section: 查验 Check ──────────────────────────────────────────────────────
 
 interface CheckState {
@@ -264,6 +488,7 @@ function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: str
   const [owner, repo] = card.full_name.split('/')
   const pageUrl = `${SITE}/p/${owner}/${repo}/`
   const dims = Object.entries(card.dimScores)
+  const drift = card.npmLatest && card.version && card.npmLatest !== card.version
   return (
     <div style={cardStyle}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10 }}>
@@ -274,6 +499,7 @@ function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: str
             {card.score !== null && <span style={{ marginRight: 10 }}>{L('健康分', 'Score')} {card.score}/100</span>}
             <Stars n={card.stars} />
             {card.npm && <span style={{ marginLeft: 10 }}>{card.npm}{card.version ? `@${card.version}` : ''}</span>}
+            {drift && <span style={{ marginLeft: 10, color: '#ca8a04' }}>npm latest {card.npmLatest}</span>}
           </div>
         </div>
       </div>
@@ -394,88 +620,64 @@ function ScenariosSection(props: {
   )
 }
 
-// ── section: 动态 Dynamics ───────────────────────────────────────────────────
+// ── the panel ────────────────────────────────────────────────────────────────
 
-function DynamicsSection(props: { doc?: DynamicsDoc; state: LoadState; error?: unknown }): JSX.Element {
-  const { doc, state, error } = props
-  if (state === 'loading' || state === 'idle') return <div style={mutedStyle}>{L('加载生态动态…', 'Loading ecosystem dynamics…')}</div>
-  if (state === 'error') return <ErrorNote error={error} />
-  if (!doc) return <div style={mutedStyle}>{L('暂无动态数据', 'No dynamics data yet')}</div>
-  const releases = doc.dsh?.releases ?? []
-  const platform = doc.platform ?? []
+const backdropStyle: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 9999,
+  display: 'flex',
+  justifyContent: 'flex-end',
+  background: 'rgba(15, 18, 26, 0.42)',
+}
+
+const drawerStyle: CSSProperties = {
+  width: 640,
+  maxWidth: '100vw',
+  height: '100%',
+  background: 'var(--bg, #ffffff)',
+  color: 'var(--fg, #1f2328)',
+  boxShadow: '-24px 0 64px rgba(15, 18, 26, 0.35)',
+  display: 'flex',
+  flexDirection: 'column',
+  fontSize: 13,
+}
+
+/** The shell.overlay entry: mounted always, visible only while open. */
+export function InsightsPanel(): JSX.Element | null {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    const onToggle = (): void => setOpen((prev) => !prev)
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener(PANEL_EVENT, onToggle)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener(PANEL_EVENT, onToggle)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [])
+
+  if (!open) return null
   return (
-    <div>
-      <div style={cardStyle}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>
-          {L('dsh 官方 Release', 'Official dsh releases')}
-          {doc.dsh?.repo && (
-            <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
-              {doc.dsh.repo} <Stars n={doc.dsh.stars ?? 0} />
-            </span>
-          )}
-        </div>
-        {releases.length === 0 && <div style={mutedStyle}>{L('暂无 release 记录', 'No releases recorded')}</div>}
-        <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-          {releases.map((rel) => (
-            <li key={rel.tag} style={{ padding: '6px 0', borderTop: '1px solid var(--border, #eef1f4)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <code style={{ fontWeight: 700 }}>{rel.name ?? rel.tag}</code>
-                {rel.breaking && (
-                  <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}>
-                    BREAKING
-                  </span>
-                )}
-                {rel.prerelease && <span style={{ ...mutedStyle, border: '1px solid var(--border, #e2e5e9)', borderRadius: 4, padding: '0 6px' }}>pre</span>}
-                <span style={mutedStyle}>{(rel.published_at ?? '').slice(0, 10)}</span>
-                {(typeof rel.added === 'number' || typeof rel.fixed === 'number') && (
-                  <span style={mutedStyle}>+{rel.added ?? 0} / fix {rel.fixed ?? 0}</span>
-                )}
-              </div>
-              {rel.summary && <div style={{ ...mutedStyle, marginTop: 2 }}>{rel.summary}</div>}
-            </li>
-          ))}
-        </ul>
+    <div style={backdropStyle} onClick={() => setOpen(false)}>
+      <div style={drawerStyle} onClick={(event) => event.stopPropagation()}>
+        <PanelContent onClose={() => setOpen(false)} />
       </div>
-
-      <div style={cardStyle}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('平台仓库动态', 'Platform repository activity')}</div>
-        <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-          {platform.map((repo) => (
-            <li key={repo.repo} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 600 }}>{repo.repo}</span>
-              <Stars n={repo.stars ?? 0} />
-              {repo.latestRelease ? (
-                <code style={mutedStyle}>
-                  {repo.latestRelease.name ?? repo.latestRelease.tag} ({(repo.latestRelease.published_at ?? '').slice(0, 10)})
-                </code>
-              ) : (
-                <span style={mutedStyle}>{L('无 release', 'no release')}</span>
-              )}
-              <span style={mutedStyle}>{L('push 于 {at}', 'pushed {at}', { at: (repo.pushed_at ?? '').slice(0, 10) })}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      {doc.fetchedAt && (
-        <div style={mutedStyle}>{L('动态抓取于 {at}', 'Dynamics fetched at {at}', { at: doc.fetchedAt.slice(0, 16).replace('T', ' ') })}</div>
-      )}
     </div>
   )
 }
 
-// ── the view ─────────────────────────────────────────────────────────────────
-
-export function InsightsView(_props: InsightsViewProps): JSX.Element {
-  const [section, setSection] = useState<Section>('check')
+function PanelContent(props: { onClose: () => void }): JSX.Element {
+  const { onClose } = props
+  const [section, setSection] = useState<Section>('audit')
   const [checkQuery, setCheckQuery] = useState('')
   const [check, setCheck] = useState<CheckState>({ state: 'idle' })
   const [scenariosDoc, setScenariosDoc] = useState<ScenariosDoc | undefined>(undefined)
   const [scenariosState, setScenariosState] = useState<LoadState>('idle')
   const [scenariosError, setScenariosError] = useState<unknown>(undefined)
-  const [dynamicsDoc, setDynamicsDoc] = useState<DynamicsDoc | undefined>(undefined)
-  const [dynamicsState, setDynamicsState] = useState<LoadState>('idle')
-  const [dynamicsError, setDynamicsError] = useState<unknown>(undefined)
   /** 顶栏中/EN 切换：写入偏好后 bump 一次，让整棵视图按新语言重渲染。 */
   const [, setLocaleTick] = useState(0)
 
@@ -492,7 +694,8 @@ export function InsightsView(_props: InsightsViewProps): JSX.Element {
       })
   }
 
-  // Lazy-load each section's dataset on first visit.
+  // Lazy-load the scenarios dataset on first visit (audit/check load inside
+  // their own sections).
   useEffect(() => {
     if (section === 'scenarios' && scenariosState === 'idle') {
       setScenariosState('loading')
@@ -506,43 +709,31 @@ export function InsightsView(_props: InsightsViewProps): JSX.Element {
           setScenariosState('error')
         })
     }
-    if (section === 'dynamics' && dynamicsState === 'idle') {
-      setDynamicsState('loading')
-      fetchDynamics()
-        .then((res) => {
-          setDynamicsDoc(res.dynamics)
-          setDynamicsState('ready')
-        })
-        .catch((error: unknown) => {
-          setDynamicsError(error)
-          setDynamicsState('error')
-        })
-    }
-  }, [section, scenariosState, dynamicsState])
+  }, [section, scenariosState])
 
-  function pickFromScenario(fullName: string): void {
+  function jumpToCheck(fullName: string): void {
     setCheckQuery(fullName)
     setSection('check')
     runCheck(fullName)
   }
 
   const tabs: Array<{ id: Section; label: string }> = [
+    { id: 'audit', label: L('体检', 'Audit') },
     { id: 'check', label: L('查验', 'Check') },
     { id: 'scenarios', label: L('场景', 'Scenarios') },
-    { id: 'dynamics', label: L('动态', 'Dynamics') },
   ]
 
   let body: ReactNode
-  if (section === 'check') {
+  if (section === 'audit') {
+    body = <AuditSection onPick={jumpToCheck} />
+  } else if (section === 'check') {
     body = <CheckSection query={checkQuery} onQueryChange={setCheckQuery} result={check} onCheck={runCheck} />
-  } else if (section === 'scenarios') {
-    body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={pickFromScenario} />
   } else {
-    body = <DynamicsSection doc={dynamicsDoc} state={dynamicsState} error={dynamicsError} />
+    body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={jumpToCheck} />
   }
 
   return (
-    <div style={pageStyle}>
+    <>
       <div style={headerStyle}>
         <span style={{ fontWeight: 700 }}>DSH Insights</span>
         {tabs.map((tab) => (
@@ -564,8 +755,11 @@ export function InsightsView(_props: InsightsViewProps): JSX.Element {
         >
           {getLocale() === 'zh' ? 'EN' : '中'}
         </button>
+        <button style={{ ...subTabStyle(false), fontSize: 11 }} onClick={onClose} title={L('关闭 (Esc)', 'Close (Esc)')}>
+          ✕
+        </button>
       </div>
       <div style={bodyStyle}>{body}</div>
-    </div>
+    </>
   )
 }
