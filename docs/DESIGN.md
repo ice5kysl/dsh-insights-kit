@@ -26,7 +26,7 @@ src/cli.ts          ──build──▶ lib/cli.js     (ESM, node + shebang; th
 ## Data flow
 
 ```
-dsh-insights.com/data/{insights,scenarios,dynamics}.json  (open dataset, regenerated ~daily)
+dsh-insights.com/data/{insights,scenarios,dynamics,compat}.json  (open dataset, regenerated ~daily)
         (DSH_INSIGHTS_UPSTREAM_BASE overrides all docs to one origin)
         ▲  lazy fetch on first request, in-memory cache, TTL 6h
         │  (failed fetches never poison the cache; concurrent firsts share one in-flight promise)
@@ -47,9 +47,10 @@ isn't data traffic: a local Typert Remote call, see below.)
 |---|---|
 | `/plugin?full_name=owner/repo` | One plugin's health card, trimmed: `full_name/stars/grade/score/dimScores/drops/npm/version/description/url`. Upstream drops are bare code strings; the host enriches them to `{code, sev, label:{zh,en}}` via the health-v5 rule table (`src/host/drops.ts`). 404 `not-in-corpus` when absent. |
 | `/search?q=&limit=20` | Case-insensitive substring match over `full_name` + `description`, ranked by stars desc; compact rows without `dimScores`/`drops`. Limit capped at 50. |
-| `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted. Comma-separated, capped at 100 names. |
+| `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted, with a `compat` slice attached to hits (`enginesDsh` + the first 3 `dshPeers`, joined from `compat.json` on npm name; a failed compat fetch degrades to no annotation). Comma-separated, capped at 100 names. |
 | `/scenarios` | `scenarios.json`, with each pick annotated by its npm `pkgName` (joined from the corpus on `full_name`, omitted when unknown) so the client can offer copyable install/uninstall commands. |
 | `/dynamics` | `dynamics.json` passthrough. |
+| `/runtime` | The running dsh version, resolved host-side via `createRequire(import.meta.url)` from `@deepseek-ai/dsh-web-app/package.json` (fallback `@deepseek-ai/dsh-base/package.json`); `null` when neither resolves. Local-only — no upstream fetch. |
 | `/health` | Liveness + per-document cache age/staleness. |
 
 Every request passes a host-trust gate mirroring the official `/api` fence
@@ -132,25 +133,32 @@ uses, whose usage we verified in its source):
   the entry moved off `conversation.view`: the toolkit is session-independent,
   and the drawer is reachable from every screen, not only inside a session.
 
-Three capability sections, each fetching lazily on first visit:
+Three capability sections, each fetching lazily on first visit (tab order:
+体检 / 场景 / 查验):
 
 1. **体检 Audit** — installed-plugin health check (see the enumeration note
-   below): per-plugin grade badge + score, an S/A/B/C/D summary bar, npm
-   version-drift badges (`npmLatest ≠ version`), "better alternatives ↗"
-   links on C/D rows (to the plugin's dsh-insights.com page, which carries
-   same-category recommendations), a BREAKING-release alert card fed by
-   `dynamics.json`, and a copyable uninstall command per row. Unlisted
-   plugins render as「未收录」rows.
-2. **查验 Check** — `owner/repo` or pasted GitHub URL (`parseRepoInput`) →
-   `/plugin` → health card: grade badge (S 紫/A 绿/B 蓝/C 橙/D 红), score,
-   dimension bars, deduction list (severity-colored), npm-latest drift hint,
-   link out to `https://dsh-insights.com/p/<owner>/<repo>/`;「不在权威集」
-   notice on `not-in-corpus`. Rows in Audit/Scenarios jump here.
-3. **场景 Scenarios** — scenario cards with recommended plugin rows; each
+   below): a「当前 dsh 版本 · 最新 release」line (running version from
+   `/runtime`, latest from `dynamics.json` dist-tags, with an upgrade hint
+   when behind on base versions), per-plugin grade badge + score, an
+   S/A/B/C/D summary bar, npm version-drift badges (`npmLatest ≠ version`),
+   a per-row dsh-compat line (`engines.dsh`, else the cordis peer range;
+   ✓/⚠ verdict when the running version is known and the range is a simple
+   ^/~ range — conservative base-version check, prerelease tags dropped, see
+   `src/shared/compat.ts`), "better alternatives ↗" links on C/D rows (to
+   the plugin's dsh-insights.com page, which carries same-category
+   recommendations), a BREAKING-release alert card fed by `dynamics.json`,
+   and a copyable uninstall command per row. Unlisted plugins render as
+   「未收录」rows.
+2. **场景 Scenarios** — scenario cards with recommended plugin rows; each
    row carries an「已安装」marker when the plugin is already installed (same
    inventory → audit chain as Audit) and a copyable install/uninstall
    command built from the host-annotated `pkgName`. Clicking a row jumps to
    Check with that plugin loaded.
+3. **查验 Check** — `owner/repo` or pasted GitHub URL (`parseRepoInput`) →
+   `/plugin` → health card: grade badge (S 紫/A 绿/B 蓝/C 橙/D 红), score,
+   dimension bars, deduction list (severity-colored), npm-latest drift hint,
+   link out to `https://dsh-insights.com/p/<owner>/<repo>/`;「不在权威集」
+   notice on `not-in-corpus`. Rows in Audit/Scenarios jump here.
 
 The panel stays strictly read-only: install/uninstall is never performed
 in-app — the buttons only copy the `dsh plugin --profile web add/remove`
@@ -173,9 +181,12 @@ differs (`src/client/inventory.ts`).
 
 Loader `moduleName`s reduce to npm name guesses (`src/shared/installed.ts`):
 scoped/plain names pass through (subpaths trimmed), path-like specifiers
-(local `dsh plugin add <path>` installs) reduce to their basename; the
-official `@deepseek-ai/*` baseline and disabled entries are excluded. The
-resulting names are health-checked in one `/dsh-insights/audit` batch.
+(local `dsh plugin add <path>` installs, including `link:`-prefixed ones)
+reduce to their basename; the official `@deepseek-ai/*` baseline and disabled
+entries are excluded, as is anything that is not npm-name-shaped after the
+reduction (Loader-internal pseudo entries like `cordis:include` never reach
+the audit batch). The resulting names are health-checked in one
+`/dsh-insights/audit` batch.
 
 Graceful degradation is first-class: if the running dsh build does not serve
 the inventory gateway (mount throws, namespace absent, or `list()` errors),
@@ -197,12 +208,15 @@ README's verification note).
 a fake npm registry, four fixture plugin directories, and a fake
 `ctx.webServer`; it covers: trimming + drop enrichment (+ `npmLatest`),
 corpus 404, input validation, search matching/ranking/limits, the audit batch
-lookup (hit/null/case/400), the inventory-entry → npm-name mapping and
-filtering (imported from `src/shared/installed.ts`, node type-stripping),
-the scenarios `pkgName` annotation, self-check as a library
-(`runSelfcheck()`: well-built S/100, skeletal plugin's full deduction set,
-write-surface scan kinds, npm drift/single/stale, path validation errors) and
-as a CLI subprocess (`lib/cli.js` exit codes 0/1/2, `--json`, `--help`),
-both passthroughs, cache health, the trust gate (403/200), upstream-failure →
-502, and cache isolation across instances. CI:
+lookup (hit/null/case/400) with its compat slice (engines.dsh + ≤3 peers),
+the runtime-version probe shape, the inventory-entry → npm-name mapping and
+filtering incl. pseudo-entry/link: handling (imported from
+`src/shared/installed.ts`, node type-stripping), the conservative ^/~ range
+check (`src/shared/compat.ts`), the scenarios `pkgName` annotation,
+self-check as a library (`runSelfcheck()`: well-built S/100, skeletal
+plugin's full deduction set, write-surface scan kinds, npm
+drift/single/stale, path validation errors) and as a CLI subprocess
+(`lib/cli.js` exit codes 0/1/2, `--json`, `--help`), both passthroughs,
+cache health, the trust gate (403/200), upstream-failure → 502, and cache
+isolation across instances. CI:
 `npm install → typecheck → build → smoke → npm pack --dry-run`.

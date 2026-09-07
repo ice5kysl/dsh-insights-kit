@@ -13,14 +13,16 @@
  * 1. 体检 Audit      — enumerates installed plugins through the official
  *    pluginInventory Remote, health-checks them against the corpus in one
  *    batch (grade badge + score per row, S/A/B/C/D summary bar, npm
- *    version-drift hints, C/D rows link to on-site alternatives), plus a
- *    BREAKING-release warning card. Builds without the inventory gateway
- *    get the degraded form: dist-tags + breaking releases + advised actions.
- * 2. 查验 Check      — paste `owner/repo` or a GitHub URL, get the plugin's
+ *    version-drift hints, per-row dsh-compat signal from compat.json, C/D
+ *    rows link to on-site alternatives), plus a running-vs-latest dsh
+ *    version line and a BREAKING-release warning card. Builds without the
+ *    inventory gateway get the degraded form: dist-tags + breaking releases
+ *    + advised actions.
+ * 2. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
+ *    jumps to Check with it loaded.
+ * 3. 查验 Check      — paste `owner/repo` or a GitHub URL, get the plugin's
  *    health card (grade badge, score, dimension bars, deduction list, link
  *    out to the full page on dsh-insights.com).
- * 3. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
- *    jumps to Check with it loaded.
  *
  * All data flows through the host `/dsh-insights` surface; the client never
  * talks to dsh-insights.com directly. Bilingual zh/en with the same toggle
@@ -35,20 +37,23 @@ import {
   fetchAudit,
   fetchDynamics,
   fetchPlugin,
+  fetchRuntime,
   fetchScenarios,
   parseRepoInput,
   type DynamicsDoc,
   type DropSeverity,
   type PluginCard,
+  type PluginCompat,
   type ReleaseRow,
   type Scenario,
   type ScenariosDoc,
 } from './api.ts'
 import { getInventoryLister, installedPluginNames } from './inventory.ts'
+import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
 
-type Section = 'audit' | 'check' | 'scenarios'
+type Section = 'audit' | 'scenarios' | 'check'
 type LoadState = 'idle' | 'loading' | 'error' | 'ready'
 
 const SITE = 'https://dsh-insights.com'
@@ -266,6 +271,61 @@ function DistTags({ tags }: { tags: Record<string, string> | undefined }): JSX.E
   )
 }
 
+/**
+ *「当前 dsh 版本 · 最新 release」line at the top of the Audit tab. Hidden
+ * entirely when the host could not resolve the running version; the upgrade
+ * hint compares base versions only (prerelease tags dropped).
+ */
+function DshVersionLine({ version, latest }: { version: string | null | undefined; latest?: string }): JSX.Element | null {
+  if (!version) return null
+  const outdated = latest ? isOutdated(version, latest) : null
+  return (
+    <div style={{ ...mutedStyle, marginBottom: 12 }}>
+      {latest
+        ? L('当前 dsh 版本 {cur} · 最新 release {lat}', 'Current dsh {cur} · latest release {lat}', { cur: version, lat: latest })
+        : L('当前 dsh 版本 {cur}', 'Current dsh {cur}', { cur: version })}
+      {outdated === true && (
+        <span style={{ color: '#ca8a04' }}>
+          {' · '}{L('有新版本，建议升级 dsh', 'newer dsh available — consider upgrading')}
+        </span>
+      )}
+      {outdated === false && (
+        <span style={{ color: '#16a34a' }}>
+          {' · '}{L('已是最新', 'up to date')} ✓
+        </span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Per-row dsh-compat line for audit hits: `engines.dsh` preferred, else the
+ * cordis peer range (or the first declared dsh peer). A ✓/⚠ verdict is shown
+ * only when the running dsh version is known and the range is a simple ^/~
+ * range (conservative base-version check); otherwise the bare range text.
+ */
+function CompatLine({ compat, dshVersion }: { compat: PluginCompat | null | undefined; dshVersion: string | null | undefined }): JSX.Element | null {
+  if (!compat) return null
+  let text: string
+  let verdictRange: string | null = null
+  if (compat.enginesDsh) {
+    text = L('dsh 兼容：engines.dsh {range}', 'dsh compat: engines.dsh {range}', { range: compat.enginesDsh })
+    verdictRange = compat.enginesDsh
+  } else {
+    const peer = compat.dshPeers.find((p) => p.name === '@deepseek-ai/cordis') ?? compat.dshPeers[0]
+    if (!peer) return null
+    text = L('dsh 兼容：peer {name} {range}', 'dsh compat: peer {name} {range}', { name: peer.name, range: peer.range })
+  }
+  const verdict = dshVersion && verdictRange ? satisfiesSimpleRange(dshVersion, verdictRange) : null
+  return (
+    <div style={{ ...mutedStyle, marginTop: 2, marginLeft: 30 }}>
+      {text}
+      {verdict === true && <span style={{ color: '#16a34a', marginLeft: 6 }} title={L('当前 dsh 版本满足该范围（按基础版本保守判断）', 'Current dsh satisfies this range (conservative base-version check)')}>✓</span>}
+      {verdict === false && <span style={{ color: '#ea580c', marginLeft: 6 }} title={L('当前 dsh 版本不满足该范围（按基础版本保守判断）', 'Current dsh does not satisfy this range (conservative base-version check)')}>⚠</span>}
+    </div>
+  )
+}
+
 // ── section: 体检 Audit ──────────────────────────────────────────────────────
 
 type AuditForm = 'loading' | 'full' | 'degraded' | 'error'
@@ -274,6 +334,8 @@ interface AuditState {
   form: AuditForm
   rows?: Array<{ name: string; card: PluginCard | null }>
   dynamics?: DynamicsDoc
+  /** Running dsh version from /dsh-insights/runtime (null when unknown). */
+  dshVersion?: string | null
   error?: unknown
 }
 
@@ -284,28 +346,34 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      // dynamics feeds both forms (breaking card + dist-tags); tolerate its
-      // failure so the audit list still renders.
-      const dynamics = await fetchDynamics()
-        .then((res) => res.dynamics)
-        .catch(() => undefined)
+      // dynamics feeds both forms (breaking card + dist-tags + latest
+      // release); the runtime probe reports the running dsh version. Both
+      // tolerate failure so the audit list still renders.
+      const [dynamics, dshVersion] = await Promise.all([
+        fetchDynamics()
+          .then((res) => res.dynamics)
+          .catch(() => undefined),
+        fetchRuntime()
+          .then((res) => res.dsh?.version ?? null)
+          .catch(() => null),
+      ])
       const lister = await getInventoryLister()
       if (!lister) {
-        if (!cancelled) setAudit({ form: 'degraded', dynamics })
+        if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion })
         return
       }
       try {
         const entries = await lister()
         const names = installedPluginNames(entries)
         if (names.length === 0) {
-          if (!cancelled) setAudit({ form: 'full', rows: [], dynamics })
+          if (!cancelled) setAudit({ form: 'full', rows: [], dynamics, dshVersion })
           return
         }
         const res = await fetchAudit(names)
         const rows = names.map((name) => ({ name, card: res.results[name] ?? null }))
-        if (!cancelled) setAudit({ form: 'full', rows, dynamics })
+        if (!cancelled) setAudit({ form: 'full', rows, dynamics, dshVersion })
       } catch (error) {
-        if (!cancelled) setAudit({ form: 'degraded', dynamics, error })
+        if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion, error })
       }
     })()
     return () => {
@@ -317,10 +385,12 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
 
   const releases = audit.dynamics?.dsh?.releases ?? []
   const distTags = audit.dynamics?.dsh?.npm?.distTags
+  const latestRelease = distTags?.latest
 
   if (audit.form === 'degraded') {
     return (
       <div>
+        <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
         <div style={cardStyle}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
             {L('此 dsh 构建无法枚举已装插件', 'This dsh build cannot enumerate installed plugins')}
@@ -366,6 +436,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
 
   return (
     <div>
+      <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
       <DistTags tags={distTags} />
       <BreakingCard releases={releases} />
 
@@ -419,32 +490,35 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
             const drift = card.npmLatest && card.version && card.npmLatest !== card.version
             const low = card.grade === 'C' || card.grade === 'D'
             return (
-              <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
-                <GradeBadge grade={card.grade} />
-                <button
-                  onClick={() => onPick(card.full_name)}
-                  style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 600, fontSize: 13, wordBreak: 'break-all', textAlign: 'left' }}
-                  title={L('在「查验」页打开健康卡', 'Open the health card on the Check tab')}
-                >
-                  {card.full_name}
-                </button>
-                {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
-                <Stars n={card.stars} />
-                {drift && (
-                  <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
-                    title={L('npm latest 与仓库版本不一致，可能有新版本', 'npm latest differs from the repo version — an update may be available')}>
-                    npm {card.npmLatest}
-                  </span>
-                )}
-                {low && (
-                  <a href={`${SITE}/p/${owner}/${repo}/`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 12 }}>
-                    {L('同类更优替代 ↗', 'better alternatives ↗')}
-                  </a>
-                )}
-                <CopyCommandButton
-                  command={`dsh plugin --profile web remove ${row.name}`}
-                  label={L('复制卸载命令', 'Copy uninstall command')}
-                />
+              <li key={row.name} style={{ padding: '4px 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <GradeBadge grade={card.grade} />
+                  <button
+                    onClick={() => onPick(card.full_name)}
+                    style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: 'inherit', fontWeight: 600, fontSize: 13, wordBreak: 'break-all', textAlign: 'left' }}
+                    title={L('在「查验」页打开健康卡', 'Open the health card on the Check tab')}
+                  >
+                    {card.full_name}
+                  </button>
+                  {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
+                  <Stars n={card.stars} />
+                  {drift && (
+                    <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
+                      title={L('npm latest 与仓库版本不一致，可能有新版本', 'npm latest differs from the repo version — an update may be available')}>
+                      npm {card.npmLatest}
+                    </span>
+                  )}
+                  {low && (
+                    <a href={`${SITE}/p/${owner}/${repo}/`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 12 }}>
+                      {L('同类更优替代 ↗', 'better alternatives ↗')}
+                    </a>
+                  )}
+                  <CopyCommandButton
+                    command={`dsh plugin --profile web remove ${row.name}`}
+                    label={L('复制卸载命令', 'Copy uninstall command')}
+                  />
+                </div>
+                <CompatLine compat={card.compat} dshVersion={audit.dshVersion} />
               </li>
             )
           })}
@@ -839,17 +913,17 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
 
   const tabs: Array<{ id: Section; label: string }> = [
     { id: 'audit', label: L('体检', 'Audit') },
-    { id: 'check', label: L('查验', 'Check') },
     { id: 'scenarios', label: L('场景', 'Scenarios') },
+    { id: 'check', label: L('查验', 'Check') },
   ]
 
   let body: ReactNode
   if (section === 'audit') {
     body = <AuditSection onPick={jumpToCheck} />
-  } else if (section === 'check') {
-    body = <CheckSection query={checkQuery} onQueryChange={setCheckQuery} result={check} onCheck={runCheck} />
-  } else {
+  } else if (section === 'scenarios') {
     body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={jumpToCheck} />
+  } else {
+    body = <CheckSection query={checkQuery} onQueryChange={setCheckQuery} result={check} onCheck={runCheck} />
   }
 
   return (

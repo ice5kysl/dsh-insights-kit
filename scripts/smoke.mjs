@@ -2,15 +2,17 @@
  * Standalone smoke test for the host face (no cordis runtime needed, no real
  * upstream). Boots:
  *
- *   1. a fixture server serving small insights/scenarios/dynamics JSON docs,
+ *   1. a fixture server serving small insights/scenarios/dynamics/compat
+ *      JSON docs,
  *   2. a fake npm registry (selfcheck npm-consistency checks),
  *   3. a tiny node:http server that mimics the `ctx.webServer` route contract
  *      and hands matching /dsh-insights requests to the plugin's handler,
  *
  * then exercises trimming, drop enrichment, search matching/ranking/limits,
- * scenarios pkgName annotation, passthrough, cache health, the trust gate,
- * and the upstream-failure → 502 path (a second apply pointed at a dead port
- * with an empty cache). The author self-check is tested as a library
+ * scenarios pkgName annotation, the audit compat slice, the runtime-version
+ * probe, passthrough, cache health, the trust gate, and the
+ * upstream-failure → 502 path (a second apply pointed at a dead port with an
+ * empty cache). The author self-check is tested as a library
  * (runSelfcheck from src/host/selfcheck.ts, imported via node type-stripping)
  * and as a CLI subprocess (lib/cli.js exit codes 0/1/2).
  *
@@ -25,6 +27,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
+import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
 import { SelfcheckError, runSelfcheck } from '../src/host/selfcheck.ts'
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -104,11 +107,32 @@ const DYNAMICS = {
   platform: [{ repo: 'deepseek-ai/DeepSeek-V3', stars: 104436, latestRelease: null }],
 }
 
+const COMPAT = {
+  generatedAt: '2026-09-07T00:00:00.000Z',
+  officialDsh: { latest: '0.1.2-rc.1', distTags: { latest: '0.1.2-rc.1' }, versions: [] },
+  plugins: [
+    {
+      pkgName: 'dsh-alpha',
+      repo: 'aaa/dsh-alpha',
+      stars: 100,
+      npmLatest: '1.2.0',
+      enginesDsh: '^0.1.1',
+      engines: [],
+      dshPeers: [
+        { name: '@deepseek-ai/cordis', range: '^4.0.1' },
+        { name: '@deepseek-ai/dsh-client-runtime', range: '^0.1.1-rc.2' },
+        { name: '@deepseek-ai/dsh-client-ui-layout', range: '^0.1.1-rc.2' },
+        { name: '@deepseek-ai/dsh-extra-peer', range: '^0.1.1' },
+      ],
+    },
+  ],
+}
+
 // ── fixture upstream ─────────────────────────────────────────────────────────
 
 const fixture = createServer((req, res) => {
   const name = (req.url ?? '').replace(/^\//, '')
-  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS }
+  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT }
   if (docs[name]) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(docs[name]))
@@ -374,6 +398,34 @@ await check('audit without names -> 400', async () => {
   if (status !== 400 || body.error?.code !== 'invalid-query') throw new Error(`status ${status}`)
 })
 
+await check('audit attaches the compat slice (engines.dsh + ≤3 peers), null when unprobed', async () => {
+  const { status, body } = await getJson('/audit?npm=' + encodeURIComponent('dsh-alpha,dsh-beta,unknown-pkg'))
+  if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
+  const alpha = body.results['dsh-alpha']
+  if (!alpha?.compat) throw new Error('alpha compat missing')
+  if (alpha.compat.enginesDsh !== '^0.1.1') throw new Error(`alpha enginesDsh wrong: ${JSON.stringify(alpha.compat)}`)
+  if (!Array.isArray(alpha.compat.dshPeers) || alpha.compat.dshPeers.length !== 3) {
+    throw new Error(`dshPeers must be capped at 3: ${JSON.stringify(alpha.compat.dshPeers)}`)
+  }
+  if (alpha.compat.dshPeers[0].name !== '@deepseek-ai/cordis' || alpha.compat.dshPeers[0].range !== '^4.0.1') {
+    throw new Error('peer shape wrong')
+  }
+  const beta = body.results['dsh-beta']
+  if (!beta || beta.compat !== null) throw new Error('unprobed plugin must carry compat: null')
+  if (body.results['unknown-pkg'] !== null) throw new Error('unknown name must still map to null')
+})
+
+await check('runtime reports the running dsh version shape (null when unresolvable)', async () => {
+  const { status, body } = await getJson('/runtime')
+  if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+  if (!('dsh' in body) || typeof body.dsh !== 'object') throw new Error(`missing dsh: ${JSON.stringify(body)}`)
+  const version = body.dsh.version
+  // In this dev checkout @deepseek-ai/dsh-web-app / dsh-base are not
+  // installed, so resolution must fail cleanly to null; inside a real dsh
+  // profile it is a version string. Accept both, assert the shape.
+  if (version !== null && typeof version !== 'string') throw new Error(`version wrong: ${JSON.stringify(version)}`)
+})
+
 await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {
   const cases = [
     ['dsh-file-explorer-kit', 'dsh-file-explorer-kit'],
@@ -382,6 +434,8 @@ await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async ()
     ['/Users/x/Code/Labs/dsh/dsh-insights-kit', 'dsh-insights-kit'],
     ['../relative/dsh-bar', 'dsh-bar'],
     ['C:\\Users\\x\\dsh-baz', 'dsh-baz'],
+    ['link:../local/dsh-linked', 'dsh-linked'],
+    ['link:/opt/local/dsh-linked2', 'dsh-linked2'],
   ]
   for (const [input, expected] of cases) {
     const got = npmNameOfModule(input)
@@ -389,7 +443,7 @@ await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async ()
   }
 })
 
-await check('installedPluginNames filters official/disabled, dedupes, sorts', async () => {
+await check('installedPluginNames filters official/disabled/pseudo entries, dedupes, sorts', async () => {
   const names = installedPluginNames([
     { moduleName: '@deepseek-ai/dsh-client-runtime', enabled: true },
     { moduleName: 'dsh-file-explorer-kit', enabled: true },
@@ -397,9 +451,41 @@ await check('installedPluginNames filters official/disabled, dedupes, sorts', as
     { moduleName: 'dsh-file-explorer-kit', enabled: true },
     { moduleName: 'dsh-disabled-one', enabled: false },
     { moduleName: 'aaa-first', enabled: true },
+    // Loader-internal pseudo entries must not leak into the audit batch:
+    { moduleName: 'cordis:include', enabled: true },
+    { moduleName: 'cordis:loader-internal', enabled: true },
+    { moduleName: 'not a package name', enabled: true },
+    // link: local installs keep working (basename-ized):
+    { moduleName: 'link:../local/dsh-linked', enabled: true },
   ])
-  const want = 'aaa-first,dsh-file-explorer-kit,dsh-workspace-kit'
+  const want = 'aaa-first,dsh-file-explorer-kit,dsh-linked,dsh-workspace-kit'
   if (names.join(',') !== want) throw new Error(`got ${names.join(',')}, want ${want}`)
+})
+
+await check('shared/compat: base version + simple ^/~ range satisfaction', async () => {
+  if (baseVersion('0.1.1-rc.2')?.join('.') !== '0.1.1') throw new Error('prerelease base wrong')
+  if (baseVersion('not.a.version') !== null) throw new Error('unparseable must be null')
+  const cases = [
+    ['0.1.1-rc.2', '^0.1.1', true],
+    ['0.1.2-rc.1', '^0.1.1', true],
+    ['0.2.0', '^0.1.1', false],
+    ['0.1.0', '^0.1.1', false],
+    ['1.4.0', '^1.2.3', true],
+    ['2.0.0', '^1.2.3', false],
+    ['0.1.5', '~0.1.2', true],
+    ['0.2.0', '~0.1.2', false],
+    ['0.0.3', '^0.0.3', true],
+    ['0.0.4', '^0.0.3', false],
+  ]
+  for (const [version, range, expected] of cases) {
+    const got = satisfiesSimpleRange(version, range)
+    if (got !== expected) throw new Error(`satisfiesSimpleRange(${version}, ${range}) = ${got}, want ${expected}`)
+  }
+  for (const undecidable of ['>=0.1.0', '0.1.x', '^0.1 || ^0.2', '*']) {
+    if (satisfiesSimpleRange('0.1.1', undecidable) !== null) throw new Error(`${undecidable} must be undecidable`)
+  }
+  if (isOutdated('0.1.1-rc.2', '0.1.2-rc.1') !== true) throw new Error('outdated check wrong')
+  if (isOutdated('0.1.2', '0.1.2-rc.1') !== false) throw new Error('same-base check wrong')
 })
 
 await check('scenarios passthrough + pkgName annotation from the corpus', async () => {
@@ -420,7 +506,7 @@ await check('dynamics passthrough', async () => {
 await check('health reports cache ages for loaded docs', async () => {
   const { status, body } = await getJson('/health')
   if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
-  for (const name of ['insights', 'scenarios', 'dynamics']) {
+  for (const name of ['insights', 'scenarios', 'dynamics', 'compat']) {
     const entry = body.caches?.[name]
     if (!entry?.cached || typeof entry.ageMs !== 'number' || entry.ageMs < 0 || entry.stale) {
       throw new Error(`cache ${name} status wrong: ${JSON.stringify(entry)}`)

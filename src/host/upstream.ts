@@ -9,6 +9,7 @@
  * - `insights.json`  (~6 MB; per-plugin health rows for the whole corpus)
  * - `scenarios.json` (scenario → recommended plugins)
  * - `dynamics.json`  (dsh releases + platform repo activity)
+ * - `compat.json`    (per-plugin engines.dsh / dsh-peer compat signals)
  *
  * The store is dependency-injected (`fetchJson`, `baseUrl`, `ttlMs`) so the
  * smoke test can run it against a local fixture server with no network.
@@ -31,6 +32,7 @@ const DEFAULT_DOC_URLS: Record<string, string> = {
   insights: `${DEFAULT_BASE_URL}/insights.json`,
   scenarios: `${DEFAULT_BASE_URL}/scenarios.json`,
   dynamics: `${DEFAULT_BASE_URL}/dynamics.json`,
+  compat: `${DEFAULT_BASE_URL}/compat.json`,
 }
 
 // ── upstream wire shapes (only the fields this plugin reads) ─────────────────
@@ -54,6 +56,59 @@ export interface UpstreamPlugin {
 export interface InsightsData {
   generatedAt?: string
   plugins: UpstreamPlugin[]
+}
+
+// ── compat.json (engines.dsh / dsh-peer compat signals, CC BY 4.0) ───────────
+
+export interface CompatPeer {
+  name: string
+  range: string
+}
+
+export interface CompatRow {
+  pkgName?: string
+  repo?: string
+  stars?: number
+  npmLatest?: string | null
+  enginesDsh?: string | null
+  engines?: string[]
+  dshPeers?: CompatPeer[]
+}
+
+export interface CompatData {
+  officialDsh?: {
+    latest?: string
+    distTags?: Record<string, string>
+    versions?: Array<{ version?: string; isPrerelease?: boolean; time?: string }>
+  }
+  plugins?: CompatRow[]
+}
+
+/** The per-plugin compat slice served to the browser (peers capped at 3). */
+export interface CompatInfo {
+  enginesDsh: string | null
+  dshPeers: CompatPeer[]
+}
+
+/**
+ * Index compat.json rows by lowercased npm package name (the /audit route
+ * joins on it). Each entry keeps only what the client renders: engines.dsh
+ * and the first 3 dsh peers.
+ */
+export function compatByNpm(doc: unknown): Map<string, CompatInfo> {
+  const map = new Map<string, CompatInfo>()
+  const plugins = (doc as CompatData | null)?.plugins
+  if (!Array.isArray(plugins)) return map
+  for (const row of plugins) {
+    if (!row || typeof row.pkgName !== 'string' || !row.pkgName) continue
+    map.set(row.pkgName.toLowerCase(), {
+      enginesDsh: typeof row.enginesDsh === 'string' && row.enginesDsh ? row.enginesDsh : null,
+      dshPeers: (Array.isArray(row.dshPeers) ? row.dshPeers : [])
+        .filter((p) => p && typeof p.name === 'string' && typeof p.range === 'string')
+        .slice(0, 3),
+    })
+  }
+  return map
 }
 
 // ── trimmed shapes served to the browser ─────────────────────────────────────
@@ -189,7 +244,7 @@ export async function defaultFetchJson(url: string): Promise<unknown> {
   }
 }
 
-type CacheName = 'insights' | 'scenarios' | 'dynamics'
+type CacheName = 'insights' | 'scenarios' | 'dynamics' | 'compat'
 
 interface CacheEntry {
   data: unknown
@@ -214,6 +269,7 @@ export interface InsightsStore {
   insights(): Promise<InsightsData>
   scenarios(): Promise<unknown>
   dynamics(): Promise<unknown>
+  compat(): Promise<unknown>
   status(): Record<CacheName, CacheStatus>
 }
 
@@ -259,8 +315,9 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
     insights,
     scenarios: () => load('scenarios'),
     dynamics: () => load('dynamics'),
+    compat: () => load('compat'),
     status() {
-      const names: CacheName[] = ['insights', 'scenarios', 'dynamics']
+      const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat']
       const out = {} as Record<CacheName, CacheStatus>
       for (const name of names) {
         const hit = cache.get(name)

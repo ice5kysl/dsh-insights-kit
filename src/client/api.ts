@@ -21,6 +21,11 @@ export interface DropInfo {
   label: { zh: string; en: string }
 }
 
+export interface PluginCompat {
+  enginesDsh: string | null
+  dshPeers: Array<{ name: string; range: string }>
+}
+
 export interface PluginCard {
   full_name: string
   url: string | null
@@ -33,6 +38,9 @@ export interface PluginCard {
   version: string | null
   npmLatest: string | null
   description: string | null
+  /** dsh-compat signal (engines.dsh + first 3 dsh peers) from compat.json;
+   *  present on /audit hits only, null when the plugin is not probed. */
+  compat?: PluginCompat | null
 }
 
 export interface SearchHit {
@@ -162,6 +170,11 @@ export async function fetchScenarios(): Promise<{ scenarios: ScenariosDoc }> {
 
 export async function fetchDynamics(): Promise<{ dynamics: DynamicsDoc }> {
   return getJson('dynamics')
+}
+
+/** The running dsh version as seen host-side (`null` when not resolvable). */
+export async function fetchRuntime(): Promise<{ dsh: { version: string | null } }> {
+  return getJson('runtime')
 }
 
 /** Batch health lookup by npm package names; unlisted names map to null. */

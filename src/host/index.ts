@@ -12,11 +12,16 @@
  *   substring match over full_name + description, ranked by stars; compact
  *   rows (no dimScores/drops).
  * - `GET /dsh-insights/audit?npm=a,b,c` — batch health lookup by npm package
- *   name (the「我的插件体检」page); each name maps to a trimmed card or null.
+ *   name (the「我的插件体检」page); each name maps to a trimmed card or null,
+ *   with a `compat` slice (engines.dsh + first 3 dsh peers, joined from
+ *   compat.json) attached to hits.
  * - `GET /dsh-insights/scenarios` — scenarios.json, with each pick annotated
  *   by its npm `pkgName` (joined from the corpus on `full_name`) so the
  *   client can offer copyable install/uninstall commands.
  * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
+ * - `GET /dsh-insights/runtime`   — the running dsh version (resolved from
+ *   the installed @deepseek-ai/dsh-web-app / dsh-base package.json; null
+ *   when not resolvable).
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
  *
  * Every request passes a host-trust gate mirroring the official /api fence:
@@ -33,9 +38,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createRequire } from 'node:module'
 import {
   UpstreamError,
   auditByNpm,
+  compatByNpm,
   createStore,
   searchPlugins,
   trimPlugin,
@@ -96,6 +103,32 @@ interface ScenariosDocShape {
   [key: string]: unknown
 }
 
+/**
+ * The running dsh version, resolved from the installed official packages'
+ * package.json (web-app first, base as fallback). Null when neither resolves
+ * (e.g. the plugin runs outside a standard dsh install). Resolved lazily and
+ * memoized — the module graph does not change over one process's lifetime.
+ */
+let dshVersionCache: string | null | undefined
+
+function dshVersion(): string | null {
+  if (dshVersionCache !== undefined) return dshVersionCache
+  const require = createRequire(import.meta.url)
+  for (const pkg of ['@deepseek-ai/dsh-web-app/package.json', '@deepseek-ai/dsh-base/package.json']) {
+    try {
+      const { version } = require(pkg) as { version?: unknown }
+      if (typeof version === 'string' && version) {
+        dshVersionCache = version
+        return version
+      }
+    } catch {
+      // not resolvable from here — try the next candidate
+    }
+  }
+  dshVersionCache = null
+  return null
+}
+
 export function apply(raw: unknown): void {
   const ctx = raw as HostCtxLike
   const log = ctx.logger('insights')
@@ -112,7 +145,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,health} (read-only)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -181,10 +214,23 @@ async function handleRequest(
         return
       }
       const data = await store.insights()
+      const results = auditByNpm(data.plugins, names)
+      // Attach the compat slice (engines.dsh + first 3 dsh peers) to each
+      // hit, joined on npm package name; unlisted names stay null. A failed
+      // compat fetch degrades to no annotation rather than failing the audit.
+      const compatDoc = await store.compat().catch(() => null)
+      const compat = compatByNpm(compatDoc)
+      const annotated: Record<string, unknown> = {}
+      for (const name of names) {
+        const card = results[name]
+        annotated[name] = card
+          ? { ...card, compat: compat.get(name.toLowerCase()) ?? null }
+          : null
+      }
       sendJson(res, 200, {
         ok: true,
         generatedAt: data.generatedAt ?? null,
-        results: auditByNpm(data.plugins, names),
+        results: annotated,
       })
       return
     }
@@ -213,6 +259,12 @@ async function handleRequest(
       sendJson(res, 200, { ok: true, dynamics: await store.dynamics() })
       return
     }
+    if (pathname === `${PREFIX}/runtime`) {
+      // Local-only info (no upstream fetch): the running dsh version, null
+      // when the official packages cannot be resolved from here.
+      sendJson(res, 200, { ok: true, dsh: { version: dshVersion() } })
+      return
+    }
     if (pathname === `${PREFIX}/health`) {
       sendJson(res, 200, {
         ok: true,
@@ -232,6 +284,7 @@ async function handleRequest(
           '/dsh-insights/audit?npm=a,b,c',
           '/dsh-insights/scenarios',
           '/dsh-insights/dynamics',
+          '/dsh-insights/runtime',
           '/dsh-insights/health',
         ],
       })
