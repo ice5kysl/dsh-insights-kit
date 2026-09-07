@@ -4,19 +4,20 @@
  * The host ships a read-only projection of the Cordis Loader state,
  * `@deepseek-ai/dsh-host-plugin-inventory` (Remote namespace
  * `pluginInventory`, method `list`). Standard dsh web builds pre-mount every
- * official Remote at boot (dsh-api-remotes), so the namespace is already
- * present on `ctx.remote` — probe it and use it directly.
+ * official Remote at boot (dsh-api-remotes), so the namespace is available as
+ * the cordis service `remote.pluginInventory`.
  *
- * Mounting the contribution ourselves (`TypertClientRemote.$mount`) is
- * deliberately NOT done: the gateway rejects non-strict codecs at mount time
- * (`requireStrictCodec` in dsh-api-gateway), so a self-mount would have to
- * bundle the official descriptor's zod schema — hundreds of KB on every page
- * load — and on standard builds it would collide with the pre-mounted
- * namespace ("already mounted") anyway.
+ * Cordis guards service access: reading `remote.pluginInventory` from a fiber
+ * that did not declare it in `inject` throws ("cannot get property … without
+ * inject"). Declaring it on the plugin's own `inject` would make it a hard
+ * dependency — on a build without the namespace the whole panel would park
+ * forever. Instead `mountInventory` parks a child fiber on the dependency
+ * (`ctx.inject([...], cb)` fires once the service appears, never otherwise)
+ * with a bounded wait, so the rest of the panel loads regardless.
  *
- * Graceful degradation is a first-class path: when the probe finds no usable
- * namespace, `mountInventory` resolves to null and the「我的插件体检」page
- * falls back to the version/compatibility reminder form.
+ * Graceful degradation is a first-class path: when the namespace never shows
+ * up, `mountInventory` resolves to null and the「我的插件体检」page falls
+ * back to the version/compatibility reminder form.
  *
  * @module dsh-insights-kit/inventory
  */
@@ -46,14 +47,27 @@ export interface RemoteLike {
   }
 }
 
+/** Minimal face of the cordis context this plugin's resolution path needs. */
+export interface CtxLike {
+  remote: RemoteLike
+  /** Park a callback on service dependencies; fires once they are available. */
+  inject(names: string[], cb: (ctx: { remote: RemoteLike }) => void): unknown
+}
+
 export type InventoryLister = () => Promise<readonly PluginInventoryEntry[]>
 
 /**
- * Probe `remote.pluginInventory` and wrap it as a lister; null when the
- * namespace is absent (enumeration unavailable on this build).
+ * Wrap `remote.pluginInventory` as a lister; null when the namespace is
+ * absent. Never throws: the cordis accessor guard throws on un-injected
+ * reads, so every probe is wrapped.
  */
 function listerOf(remote: RemoteLike): InventoryLister | null {
-  const ns = remote.pluginInventory
+  let ns: RemoteLike['pluginInventory']
+  try {
+    ns = remote.pluginInventory
+  } catch {
+    return null
+  }
   if (!ns || typeof ns.list !== 'function') return null
   return async () => {
     const result = await ns.list()
@@ -64,12 +78,28 @@ function listerOf(remote: RemoteLike): InventoryLister | null {
   }
 }
 
+/** Bounded wait for the namespace service to appear after apply(). */
+const INVENTORY_WAIT_MS = 3000
+
 /**
- * Resolve the inventory lister from the pre-mounted namespace; null when the
- * running build does not expose it (enumeration unavailable → degraded page).
+ * Resolve the inventory lister. The namespace is usually pre-mounted by the
+ * time a dynamic plugin starts, so the injected child fiber fires on the next
+ * tick; on builds without it the wait times out to null (degraded page).
+ * The returned promise never rejects.
  */
-export async function mountInventory(remote: RemoteLike): Promise<InventoryLister | null> {
-  return listerOf(remote)
+export function mountInventory(ctx: CtxLike): Promise<InventoryLister | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), INVENTORY_WAIT_MS)
+    try {
+      ctx.inject(['remote', 'remote.pluginInventory'], (child) => {
+        clearTimeout(timer)
+        resolve(listerOf(child.remote))
+      })
+    } catch {
+      clearTimeout(timer)
+      resolve(null)
+    }
+  })
 }
 
 // ── module-level stash (slot components get no ctx) ──────────────────────────
