@@ -1,6 +1,6 @@
 {
   "name": "dsh-insights-kit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "dsh (DeepSeek Harness) plugin: the DSH Insights (dsh-insights.com) ecosystem assistant inside the dsh Web GUI — audit installed plugins, check health scores before installing, and discover plugins by scenario (host /dsh-insights routes on ctx.webServer + a sidebar footer action opening an overlay panel).",
   "type": "module",
   "main": "lib/index.js",
