@@ -115,7 +115,7 @@ The author self-check is a **CLI**, not a panel section:
   served in place of an error — callers get a clean 502 instead of
   silently-old data.
 - Injectable (`baseUrl` / `fetchJson` / `ttlMs` / `now`) so
-  `scripts/smoke.mjs` runs the whole surface against a local fixture server
+  `tests/smoke.test.mjs` runs the whole surface against a local fixture server
   with zero network access; `DSH_INSIGHTS_UPSTREAM_BASE` overrides the origin
   for the same purpose at runtime.
 
@@ -216,7 +216,7 @@ README's verification note).
 
 ## Testing / CI
 
-`scripts/smoke.mjs` (run as `npm test`, also in CI) boots a fixture upstream,
+`tests/smoke.test.mjs` (run as `npm test`, also in CI) boots a fixture upstream,
 a fake npm registry, four fixture plugin directories, and a fake
 `ctx.webServer`; it covers: trimming + drop enrichment (+ `npmLatest`),
 corpus 404, input validation, search matching/ranking/limits, the audit batch

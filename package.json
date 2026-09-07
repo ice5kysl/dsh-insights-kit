@@ -53,7 +53,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/smoke.mjs",
+    "test": "node tests/smoke.test.mjs",
     "prepare": "npm run build",
     "prepack": "npm run build"
   },

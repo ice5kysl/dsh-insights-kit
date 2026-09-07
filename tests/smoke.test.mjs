@@ -16,7 +16,7 @@
  * (runSelfcheck from src/host/selfcheck.ts, imported via node type-stripping)
  * and as a CLI subprocess (lib/cli.js exit codes 0/1/2).
  *
- * Run: npm run build && node scripts/smoke.mjs   (from the plugin directory)
+ * Run: npm run build && node tests/smoke.test.mjs   (from the plugin directory)
  */
 
 import { createServer, request as httpRequest } from 'node:http'
