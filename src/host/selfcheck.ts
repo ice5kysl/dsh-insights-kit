@@ -1,7 +1,7 @@
 /**
- * Author self-check (`/dsh-insights/selfcheck`): the dsh-plugin-health CLI's
- * --dir capability rebuilt on the host face, for plugin authors before
- * publish.
+ * Author self-check: the dsh-plugin-health CLI's --dir capability as a plain
+ * library function, driven by the `dsh-insights-kit selfcheck <dir>` CLI
+ * (src/cli.ts), for plugin authors before publish.
  *
  * Given a local plugin directory it:
  *

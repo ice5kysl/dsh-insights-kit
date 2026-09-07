@@ -9,6 +9,8 @@
  *   the dsh client module system serves over /plugins; bare requires that
  *   stay in the body are resolved at runtime against the platform baseline
  *   and the enabled dynamic plugin rows).
+ * - CLI face: src/cli.ts → lib/cli.js (ESM, node, shebang banner; the
+ *   package.json `bin` entry `dsh-insights-kit`).
  *
  * Run: `npm run build` (node 20+).
  */
@@ -74,7 +76,23 @@ async function main() {
   writeFileSync(join(root, 'lib/client.js'), body)
   rmSync(join(root, 'lib/.client.body.js'), { force: true })
 
-  console.log('[build] lib/index.js + lib/client.js written')
+  // ---- CLI face ------------------------------------------------------------
+  await build({
+    entryPoints: [join(root, 'src/cli.ts')],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: 'node20',
+    outfile: join(root, 'lib/cli.js'),
+    // Same posture as the host face: externalize bare specifiers (only node
+    // builtins occur), bundle our own relative sources. The entry's leading
+    // shebang is propagated by esbuild (an explicit banner would duplicate
+    // it), keeping lib/cli.js executable for the package.json `bin` entry.
+    packages: 'external',
+    logLevel: 'info',
+  })
+
+  console.log('[build] lib/index.js + lib/client.js + lib/cli.js written')
 }
 
 main().catch((error) => {

@@ -3,22 +3,31 @@
  * upstream). Boots:
  *
  *   1. a fixture server serving small insights/scenarios/dynamics JSON docs,
- *   2. a tiny node:http server that mimics the `ctx.webServer` route contract
+ *   2. a fake npm registry (selfcheck npm-consistency checks),
+ *   3. a tiny node:http server that mimics the `ctx.webServer` route contract
  *      and hands matching /dsh-insights requests to the plugin's handler,
  *
  * then exercises trimming, drop enrichment, search matching/ranking/limits,
- * passthrough, cache health, the trust gate, and the upstream-failure → 502
- * path (a second apply pointed at a dead port with an empty cache).
+ * scenarios pkgName annotation, passthrough, cache health, the trust gate,
+ * and the upstream-failure → 502 path (a second apply pointed at a dead port
+ * with an empty cache). The author self-check is tested as a library
+ * (runSelfcheck from src/host/selfcheck.ts, imported via node type-stripping)
+ * and as a CLI subprocess (lib/cli.js exit codes 0/1/2).
  *
  * Run: npm run build && node scripts/smoke.mjs   (from the plugin directory)
  */
 
 import { createServer, request as httpRequest } from 'node:http'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
+import { SelfcheckError, runSelfcheck } from '../src/host/selfcheck.ts'
+
+const rootDir = dirname(dirname(fileURLToPath(import.meta.url)))
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -393,8 +402,14 @@ await check('installedPluginNames filters official/disabled, dedupes, sorts', as
   if (names.join(',') !== want) throw new Error(`got ${names.join(',')}, want ${want}`)
 })
 
-await check('scenarios passthrough', async () => {  const { status, body } = await getJson('/scenarios')
+await check('scenarios passthrough + pkgName annotation from the corpus', async () => {
+  const { status, body } = await getJson('/scenarios')
   if (status !== 200 || body.scenarios?.scenarios?.[0]?.id !== 'session-archive') throw new Error(`status ${status}`)
+  const [beta, gamma] = body.scenarios.scenarios[0].plugins
+  // bbb/dsh-beta has pkgName 'dsh-beta' in the corpus; ccc/dsh-gamma has none.
+  if (beta.pkgName !== 'dsh-beta') throw new Error(`pkgName annotation missing: ${JSON.stringify(beta)}`)
+  if ('pkgName' in gamma) throw new Error('pkgName must be omitted when the corpus row has none')
+  if (beta.grade !== 'S' || beta.reasons?.[0] !== '标签: archive') throw new Error('pick fields not preserved')
 })
 
 await check('dynamics passthrough', async () => {
@@ -413,10 +428,20 @@ await check('health reports cache ages for loaded docs', async () => {
   }
 })
 
+// ── selfcheck: library-level (runSelfcheck against the fixture dirs) ─────────
+
+async function expectSelfcheckError(code, promise) {
+  try {
+    await promise
+  } catch (error) {
+    if (error instanceof SelfcheckError && error.code === code) return
+    throw new Error(`expected SelfcheckError ${code}, got ${error?.code ?? error}`)
+  }
+  throw new Error(`expected SelfcheckError ${code}, but the call resolved`)
+}
+
 await check('selfcheck: well-built plugin scores S/100 with no drops', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(goodDir))
-  if (status !== 200 || !body.ok) throw new Error(`status ${status} ${JSON.stringify(body)}`)
-  const r = body.report
+  const r = await runSelfcheck(goodDir)
   if (r.score !== 100 || r.grade !== 'S') throw new Error(`score ${r.score} grade ${r.grade}: ${JSON.stringify(r.drops)}`)
   if (r.drops.length !== 0) throw new Error(`unexpected drops: ${r.drops.map((d) => d.code)}`)
   if (r.pkgName !== 'good-pkg' || r.version !== '1.0.0') throw new Error('pkg fields wrong')
@@ -426,9 +451,7 @@ await check('selfcheck: well-built plugin scores S/100 with no drops', async () 
 })
 
 await check('selfcheck: skeletal plugin collects the expected rule codes', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(badDir))
-  if (status !== 200) throw new Error(`status ${status}`)
-  const r = body.report
+  const r = await runSelfcheck(badDir)
   const codes = new Set(r.drops.map((d) => d.code))
   const want = [
     'docs.no-readme', 'npm.unpublished', 'selfcheck.no-bundle-patch',
@@ -446,41 +469,88 @@ await check('selfcheck: skeletal plugin collects the expected rule codes', async
 })
 
 await check('selfcheck: write-surface scan flags fs/child-process/http-write', async () => {
-  const { body } = await getJson('/selfcheck?dir=' + encodeURIComponent(writingDir))
-  const kinds = new Set(body.report.scan.hits.map((h) => h.kind))
+  const r = await runSelfcheck(writingDir)
+  const kinds = new Set(r.scan.hits.map((h) => h.kind))
   for (const kind of ['文件系统写 fs-write', '子进程执行 child-process', 'HTTP 写动词 http-write']) {
     if (!kinds.has(kind)) throw new Error(`scan kind missing: ${kind} (got ${[...kinds]})`)
   }
-  if (body.report.scan.totalHits < 3) throw new Error('totalHits wrong')
-  if (!body.report.scan.hits[0].file.endsWith('evil.ts')) throw new Error('hit file wrong')
+  if (r.scan.totalHits < 3) throw new Error('totalHits wrong')
+  if (!r.scan.hits[0].file.endsWith('evil.ts')) throw new Error('hit file wrong')
 })
 
 await check('selfcheck: npm drift + single-release + stale are scored', async () => {
-  const { body } = await getJson('/selfcheck?dir=' + encodeURIComponent(driftDir))
-  const codes = new Set(body.report.drops.map((d) => d.code))
+  const r = await runSelfcheck(driftDir)
+  const codes = new Set(r.drops.map((d) => d.code))
   for (const code of ['npm.version-drift', 'npm.single-release', 'npm.release-stale']) {
     if (!codes.has(code)) throw new Error(`missing ${code} (got ${[...codes]})`)
   }
 })
 
-await check('selfcheck: relative path rejected (400)', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('some/relative/dir'))
-  if (status !== 400 || body.error?.code !== 'invalid-path') throw new Error(`status ${status}`)
+await check('selfcheck: relative path rejected (invalid-path)', async () => {
+  await expectSelfcheckError('invalid-path', runSelfcheck('some/relative/dir'))
 })
 
-await check('selfcheck: .. traversal rejected (400)', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('/tmp/../etc'))
-  if (status !== 400 || body.error?.code !== 'invalid-path') throw new Error(`status ${status}`)
+await check('selfcheck: .. traversal rejected (invalid-path)', async () => {
+  await expectSelfcheckError('invalid-path', runSelfcheck('/tmp/../etc'))
 })
 
-await check('selfcheck: nonexistent dir -> 404', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent('/tmp/dsh-no-such-dir-xyz'))
-  if (status !== 404 || body.error?.code !== 'not-a-directory') throw new Error(`status ${status}`)
+await check('selfcheck: nonexistent dir (not-a-directory)', async () => {
+  await expectSelfcheckError('not-a-directory', runSelfcheck('/tmp/dsh-no-such-dir-xyz'))
 })
 
-await check('selfcheck: dir without package.json -> 400', async () => {
-  const { status, body } = await getJson('/selfcheck?dir=' + encodeURIComponent(fixtureRoot))
-  if (status !== 400 || body.error?.code !== 'no-package-json') throw new Error(`status ${status}`)
+await check('selfcheck: dir without package.json (no-package-json)', async () => {
+  await expectSelfcheckError('no-package-json', runSelfcheck(fixtureRoot))
+})
+
+// ── selfcheck: CLI subprocess (lib/cli.js exit codes) ────────────────────────
+
+// The static import of ../lib/index.js at the top already makes a prior build
+// a hard prerequisite; build once more here when only the CLI entry is
+// missing (e.g. `npm test` run straight after pulling this change).
+const cliPath = join(rootDir, 'lib/cli.js')
+if (!existsSync(cliPath)) {
+  execFileSync(process.execPath, [join(rootDir, 'scripts/build.mjs')], { cwd: rootDir, stdio: 'inherit' })
+}
+
+function runCli(args) {
+  try {
+    const stdout = execFileSync(process.execPath, [cliPath, ...args], { encoding: 'utf8' })
+    return { code: 0, out: stdout }
+  } catch (error) {
+    return { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
+  }
+}
+
+await check('cli: selfcheck good fixture exits 0 with S/100 text report', async () => {
+  const { code, out } = runCli(['selfcheck', goodDir])
+  if (code !== 0) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
+  if (!/100\/100/.test(out) || !/等级 S|Grade S/.test(out)) throw new Error(`unexpected output: ${out.slice(0, 300)}`)
+  if (!out.includes('good-pkg@1.0.0')) throw new Error('pkg line missing')
+})
+
+await check('cli: selfcheck bad fixture exits 1 with grouped deductions', async () => {
+  const { code, out } = runCli(['selfcheck', badDir])
+  if (code !== 1) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
+  if (!out.includes('docs.no-readme')) throw new Error('docs.no-readme missing from output')
+  if (!/Fix:|怎么修：/.test(out)) throw new Error('fix guidance missing')
+})
+
+await check('cli: selfcheck --json prints the full report', async () => {
+  const { code, out } = runCli(['selfcheck', goodDir, '--json'])
+  if (code !== 0) throw new Error(`exit ${code}`)
+  const report = JSON.parse(out)
+  if (report.score !== 100 || report.grade !== 'S' || report.pkgName !== 'good-pkg') throw new Error('report fields wrong')
+})
+
+await check('cli: relative path exits 2 with a friendly error', async () => {
+  const { code, out } = runCli(['selfcheck', 'some/relative/dir'])
+  if (code !== 2) throw new Error(`exit ${code}`)
+  if (!out.includes('invalid-path')) throw new Error(`error code missing: ${out.slice(0, 200)}`)
+})
+
+await check('cli: --help prints usage and exits 0', async () => {
+  const { code, out } = runCli(['--help'])
+  if (code !== 0 || !out.includes('selfcheck <dir>')) throw new Error(`exit ${code}`)
 })
 
 /** Raw HTTP GET with an explicit Host header (undici fetch forbids it). */

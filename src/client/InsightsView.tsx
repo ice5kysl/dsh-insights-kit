@@ -36,7 +36,6 @@ import {
   fetchDynamics,
   fetchPlugin,
   fetchScenarios,
-  fetchSelfcheck,
   parseRepoInput,
   type DynamicsDoc,
   type DropSeverity,
@@ -44,13 +43,12 @@ import {
   type ReleaseRow,
   type Scenario,
   type ScenariosDoc,
-  type SelfcheckReport,
 } from './api.ts'
 import { getInventoryLister, installedPluginNames } from './inventory.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
 
-type Section = 'audit' | 'check' | 'scenarios' | 'selfcheck'
+type Section = 'audit' | 'check' | 'scenarios'
 type LoadState = 'idle' | 'loading' | 'error' | 'ready'
 
 const SITE = 'https://dsh-insights.com'
@@ -137,6 +135,54 @@ const cardStyle: CSSProperties = {
 }
 
 const mutedStyle: CSSProperties = { color: 'var(--fg-muted, #6a737d)', fontSize: 12 }
+
+/** Small「已安装 / Installed」marker on scenario rows. */
+const installedPillStyle: CSSProperties = {
+  ...mutedStyle,
+  border: '1px solid var(--border, #e2e5e9)',
+  borderRadius: 6,
+  padding: '0 6px',
+  fontSize: 11,
+  flexShrink: 0,
+}
+
+/** Row-trailing「复制命令」button (copies a terminal command, never runs it). */
+const copyButtonStyle: CSSProperties = {
+  border: '1px solid var(--border, #d0d7de)',
+  borderRadius: 6,
+  padding: '2px 8px',
+  fontSize: 11,
+  cursor: 'pointer',
+  background: 'transparent',
+  color: 'var(--fg-muted, #6a737d)',
+  flexShrink: 0,
+}
+
+/**
+ * One-shot copy-to-clipboard button for a terminal command (`dsh plugin …`).
+ * The panel stays read-only: it never installs/removes anything itself.
+ * Shows「已复制 ✓」for ~2s after a successful copy. stopPropagation keeps the
+ * surrounding row's onPick from firing.
+ */
+function CopyCommandButton(props: { command: string; label: string }): JSX.Element {
+  const { command, label } = props
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      style={copyButtonStyle}
+      title={command}
+      onClick={(event) => {
+        event.stopPropagation()
+        void navigator.clipboard.writeText(command).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 2000)
+        }).catch(() => {})
+      }}
+    >
+      {copied ? L('已复制 ✓', 'Copied ✓') : label}
+    </button>
+  )
+}
 
 function GradeBadge({ grade, large }: { grade: string | null | undefined; large?: boolean }): JSX.Element {
   const g = (grade ?? '?').toUpperCase()
@@ -362,6 +408,10 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   <GradeBadge grade={null} />
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
                   <span style={mutedStyle}>{L('未收录（不在权威集）', 'unlisted (not in the corpus)')}</span>
+                  <CopyCommandButton
+                    command={`dsh plugin --profile web remove ${row.name}`}
+                    label={L('复制卸载命令', 'Copy uninstall command')}
+                  />
                 </li>
               )
             }
@@ -391,12 +441,22 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                     {L('同类更优替代 ↗', 'better alternatives ↗')}
                   </a>
                 )}
+                <CopyCommandButton
+                  command={`dsh plugin --profile web remove ${row.name}`}
+                  label={L('复制卸载命令', 'Copy uninstall command')}
+                />
               </li>
             )
           })}
         </ul>
       </div>
       <div style={mutedStyle}>
+        {L(
+          '「复制卸载命令」只复制到剪贴板：在终端执行，完成后重启 dsh web 生效。',
+          'The copy-uninstall button only copies to the clipboard: run it in a terminal; restart `dsh web` to take effect.',
+        )}
+      </div>
+      <div style={{ ...mutedStyle, marginTop: 4 }}>
         {L(
           '枚举来源：官方 pluginInventory Remote（Cordis Loader 实时状态）；健康分来自 dsh-insights.com 权威集（客观启发式信号，非安全审计）。',
           'Enumeration source: the official pluginInventory Remote (live Cordis Loader state); health scores from the dsh-insights.com corpus (objective heuristic signals, not a security audit).',
@@ -559,6 +619,8 @@ function HealthCard({ card, generatedAt }: { card: PluginCard; generatedAt?: str
 
 // ── section: 场景 Scenarios ──────────────────────────────────────────────────
 
+const EMPTY_SET: ReadonlySet<string> = new Set()
+
 function ScenariosSection(props: {
   doc?: ScenariosDoc
   state: LoadState
@@ -566,14 +628,52 @@ function ScenariosSection(props: {
   onPick: (fullName: string) => void
 }): JSX.Element {
   const { doc, state, error, onPick } = props
+  const [installed, setInstalled] = useState<ReadonlySet<string>>(EMPTY_SET)
+
+  // Resolve the set of installed corpus plugins once on mount (same chain as
+  // the Audit section: inventory Remote → npm names → batch audit). When the
+  // inventory gateway is unavailable or the audit fails, rows simply render
+  // without the「已安装」marker — never an error here.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const lister = await getInventoryLister()
+        if (!lister) return
+        const entries = await lister()
+        const names = installedPluginNames(entries)
+        if (names.length === 0) return
+        const res = await fetchAudit(names)
+        if (cancelled) return
+        const found = new Set<string>()
+        for (const name of names) {
+          const card = res.results[name]
+          if (card) found.add(card.full_name)
+        }
+        setInstalled(found)
+      } catch {
+        // silent degradation, see above
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   if (state === 'loading' || state === 'idle') return <div style={mutedStyle}>{L('加载场景推荐…', 'Loading scenario picks…')}</div>
   if (state === 'error') return <ErrorNote error={error} />
   const scenarios: Scenario[] = doc?.scenarios ?? []
   if (scenarios.length === 0) return <div style={mutedStyle}>{L('暂无场景数据', 'No scenario data yet')}</div>
   return (
     <div>
-      <div style={{ ...mutedStyle, marginBottom: 12 }}>
+      <div style={{ ...mutedStyle, marginBottom: 4 }}>
         {L('按使用场景发现插件（{n} 个场景）；点任意插件跳到「查验」。', 'Discover plugins by use case ({n} scenarios); click any plugin to jump to Check.', { n: scenarios.length })}
+      </div>
+      <div style={{ ...mutedStyle, marginBottom: 12 }}>
+        {L(
+          '「复制安装/卸载命令」只复制到剪贴板：在终端执行，完成后重启 dsh web 生效。',
+          'The copy install/uninstall buttons only copy to the clipboard: run in a terminal; restart `dsh web` to take effect.',
+        )}
       </div>
       {scenarios.map((scenario) => (
         <div key={scenario.id} style={cardStyle}>
@@ -586,235 +686,56 @@ function ScenariosSection(props: {
             )}
           </div>
           <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-            {(scenario.plugins ?? []).map((plugin) => (
-              <li key={plugin.full_name}>
-                <button
-                  onClick={() => onPick(plugin.full_name)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    width: '100%',
-                    textAlign: 'left',
-                    border: 'none',
-                    background: 'none',
-                    padding: '4px 0',
-                    cursor: 'pointer',
-                    color: 'inherit',
-                    fontSize: 13,
-                  }}
-                >
-                  <GradeBadge grade={plugin.grade} />
-                  <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{plugin.full_name}</span>
-                  {typeof plugin.stars === 'number' && <Stars n={plugin.stars} />}
-                  {plugin.reasons && plugin.reasons.length > 0 && (
-                    <span style={{ ...mutedStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {plugin.reasons[0]}
-                    </span>
-                  )}
-                </button>
-              </li>
-            ))}
+            {(scenario.plugins ?? []).map((plugin) => {
+              const isInstalled = installed.has(plugin.full_name)
+              return (
+                <li key={plugin.full_name}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <button
+                      onClick={() => onPick(plugin.full_name)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        flex: 1,
+                        minWidth: 0,
+                        flexWrap: 'wrap',
+                        textAlign: 'left',
+                        border: 'none',
+                        background: 'none',
+                        padding: '4px 0',
+                        cursor: 'pointer',
+                        color: 'inherit',
+                        fontSize: 13,
+                      }}
+                    >
+                      <GradeBadge grade={plugin.grade} />
+                      <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{plugin.full_name}</span>
+                      {isInstalled && <span style={installedPillStyle}>{L('已安装', 'Installed')}</span>}
+                      {typeof plugin.stars === 'number' && <Stars n={plugin.stars} />}
+                      {plugin.reasons && plugin.reasons.length > 0 && (
+                        <span style={{ ...mutedStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {plugin.reasons[0]}
+                        </span>
+                      )}
+                    </button>
+                    {plugin.pkgName && (
+                      <CopyCommandButton
+                        command={isInstalled
+                          ? `dsh plugin --profile web remove ${plugin.pkgName}`
+                          : `dsh plugin --profile web add ${plugin.pkgName}`}
+                        label={isInstalled
+                          ? L('复制卸载命令', 'Copy uninstall command')
+                          : L('复制安装命令', 'Copy install command')}
+                      />
+                    )}
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         </div>
       ))}
-    </div>
-  )
-}
-
-// ── section: 作者自检 Self-check ─────────────────────────────────────────────
-
-const CATEGORY_LABELS: Record<string, { zh: string; en: string }> = {
-  manifest: { zh: '清单', en: 'Manifest' },
-  selfcheck: { zh: '结构', en: 'Structure' },
-  docs: { zh: '文档', en: 'Docs' },
-  repo: { zh: '仓库', en: 'Repo' },
-  eng: { zh: '工程', en: 'Engineering' },
-  npm: { zh: 'npm', en: 'npm' },
-}
-const CATEGORY_ORDER = ['manifest', 'selfcheck', 'docs', 'repo', 'eng', 'npm']
-
-interface SelfcheckState {
-  state: LoadState
-  report?: SelfcheckReport
-  error?: unknown
-}
-
-function SelfcheckSection(): JSX.Element {
-  const [input, setInput] = useState('')
-  const [result, setResult] = useState<SelfcheckState>({ state: 'idle' })
-  const [hint, setHint] = useState('')
-
-  function submit(): void {
-    const dir = input.trim()
-    if (!dir.startsWith('/')) {
-      setHint(L('请输入本机插件目录的绝对路径（以 / 开头）', 'Enter the absolute path of a local plugin directory (starting with /)'))
-      return
-    }
-    setHint('')
-    setResult({ state: 'loading' })
-    fetchSelfcheck(dir)
-      .then((res) => setResult({ state: 'ready', report: res.report }))
-      .catch((error: unknown) => setResult({ state: 'error', error }))
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-        <input
-          style={inputStyle}
-          value={input}
-          placeholder={L('/abs/path/to/your-plugin（发布前本地体检）', '/abs/path/to/your-plugin (pre-publish local check)')}
-          onChange={(event) => setInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') submit()
-          }}
-        />
-        <button style={buttonStyle} onClick={submit} disabled={result.state === 'loading'}>
-          {result.state === 'loading' ? L('自检中…', 'Checking…') : L('自检', 'Self-check')}
-        </button>
-      </div>
-      {hint && <div style={{ ...mutedStyle, color: '#ea580c', marginBottom: 8 }}>{hint}</div>}
-      <div style={{ ...mutedStyle, marginBottom: 12 }}>
-        {L(
-          '面向插件作者：按 health-v5 规则书对本机插件目录现场评分（dsh-plugin-health CLI 的 --dir 能力），含只读面安全扫描与 npm 一致性。只读，不修改任何文件。',
-          'For plugin authors: scores a local plugin directory on the spot with the health-v5 rulebook (the dsh-plugin-health CLI\'s --dir capability), including a read-only surface scan and npm consistency. Read-only; nothing is modified.',
-        )}
-      </div>
-
-      {result.state === 'error' && <ErrorNote error={result.error} />}
-      {result.report && <SelfcheckCard report={result.report} />}
-    </div>
-  )
-}
-
-function SelfcheckCard({ report }: { report: SelfcheckReport }): JSX.Element {
-  // Group deductions by rule-code category (prefix before the first dot).
-  const groups = new Map<string, SelfcheckReport['drops']>()
-  for (const d of report.drops) {
-    const category = d.code.split('.')[0] ?? 'misc'
-    const list = groups.get(category) ?? []
-    list.push(d)
-    groups.set(category, list)
-  }
-  const orderedCategories = [...groups.keys()].sort(
-    (a, b) => (CATEGORY_ORDER.indexOf(a) + 1 || 99) - (CATEGORY_ORDER.indexOf(b) + 1 || 99),
-  )
-  const badgeColor = (GRADE_COLORS[report.grade] ?? '#64748b').slice(1)
-  const badgeMarkdown = `![health](https://img.shields.io/badge/health-${report.grade}%20${report.score}-${badgeColor})`
-  const scan = report.scan
-
-  return (
-    <div>
-      <div style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 8 }}>
-          <GradeBadge grade={report.grade} large />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>
-              {report.pkgName ?? L('（未声明包名）', '(no package name)')}{report.version ? `@${report.version}` : ''}
-            </div>
-            <div style={mutedStyle}>
-              {L('得分', 'Score')} {report.score}/100
-              {report.npm && (
-                <span style={{ marginLeft: 10 }}>
-                  {report.npm.error
-                    ? L('npm registry 不可达（npm 规则未计分）', 'npm registry unreachable (npm rules not scored)')
-                    : report.npm.published
-                      ? `npm latest ${report.npm.latest ?? '?'} · ${report.npm.versions ?? '?'} ${L('个版本', 'releases')}`
-                      : L('npm 未发布', 'not published to npm')}
-                </span>
-              )}
-            </div>
-            <div style={{ ...mutedStyle, wordBreak: 'break-all' }}>{report.dir}</div>
-          </div>
-        </div>
-        <div style={{ marginBottom: 4, fontWeight: 600, fontSize: 12 }}>{L('徽章 markdown', 'Badge markdown')}</div>
-        <code style={{ display: 'block', ...mutedStyle, border: '1px solid var(--border, #e2e5e9)', borderRadius: 6, padding: '6px 8px', wordBreak: 'break-all', userSelect: 'all' }}>
-          {badgeMarkdown}
-        </code>
-      </div>
-
-      {report.drops.length === 0 ? (
-        <div style={{ ...cardStyle, borderColor: '#16a34a' }}>
-          <span style={{ color: '#16a34a', fontWeight: 600 }}>{L('全部通过，无扣分项', 'All checks passed — no deductions')}</span>
-        </div>
-      ) : (
-        orderedCategories.map((category) => (
-          <div key={category} style={cardStyle}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>
-              {CATEGORY_LABELS[category] ? L(CATEGORY_LABELS[category].zh, CATEGORY_LABELS[category].en) : category}
-              <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
-                −{groups.get(category)!.reduce((acc, d) => acc + ({ fail: 20, major: 10, warn: 5, minor: 2 } as Record<DropSeverity, number>)[d.sev], 0)}
-              </span>
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-              {groups.get(category)!.map((d) => (
-                <li key={d.code} style={{ padding: '3px 0' }}>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                    <span style={{ color: SEV_COLORS[d.sev] ?? '#64748b', fontSize: 11, fontWeight: 700, minWidth: 44, textTransform: 'uppercase', flexShrink: 0 }}>
-                      {d.sev}
-                    </span>
-                    <span>{L(d.label.zh, d.label.en)}</span>
-                    <code style={{ ...mutedStyle, fontSize: 11 }}>{d.code}</code>
-                  </div>
-                  {(d.fix.zh || d.fix.en) && (
-                    <div style={{ ...mutedStyle, marginLeft: 52 }}>
-                      {L('怎么修：', 'Fix: ')}{L(d.fix.zh, d.fix.en)}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))
-      )}
-
-      <div style={cardStyle}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('只读面安全扫描', 'Read-only surface scan')}</div>
-        <div style={{ ...mutedStyle, marginBottom: 6 }}>
-          {L(
-            '源码 {files} 个 · 消毒引用 {san} 个{danger}',
-            '{files} source files · {san} with sanitization refs{danger}',
-            {
-              files: scan.srcFiles,
-              san: scan.sanitizedRefs,
-              danger: scan.dangerouslySetInnerHTML ? L(' · ⚠ 存在 dangerouslySetInnerHTML', ' · ⚠ dangerouslySetInnerHTML present') : '',
-            },
-          )}
-        </div>
-        {scan.totalHits === 0 ? (
-          <div style={{ color: '#16a34a', fontSize: 12 }}>{L('未发现写盘 / 子进程 / HTTP 写动词', 'No fs writes / child processes / HTTP write verbs found')}</div>
-        ) : (
-          <>
-            <div style={{ ...mutedStyle, marginBottom: 4 }}>
-              {L('{n} 处命中（宣称"只读"的插件需逐条解释）：', '{n} hit(s) (plugins claiming read-only must justify each):', { n: scan.totalHits })}
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-              {scan.hits.map((hit, index) => (
-                <li key={index} style={{ fontSize: 12, padding: '1px 0' }}>
-                  <code>{hit.file}</code>
-                  <span style={mutedStyle}> → {hit.kind}（{hit.match}）</span>
-                </li>
-              ))}
-            </ul>
-            {scan.totalHits > scan.hits.length && (
-              <div style={mutedStyle}>{L('…等共 {n} 处', '…{n} in total', { n: scan.totalHits })}</div>
-            )}
-          </>
-        )}
-      </div>
-
-      <div style={cardStyle}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('本地不可判定的规则（不计分）', 'Rules not decidable locally (not scored)')}</div>
-        <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
-          {report.uncovered.map((u) => (
-            <li key={u.code} style={{ fontSize: 12, padding: '1px 0' }}>
-              <code style={mutedStyle}>{u.code}</code>
-              <span style={mutedStyle}> — {L(u.reason.zh, u.reason.en)}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
     </div>
   )
 }
@@ -920,7 +841,6 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
     { id: 'audit', label: L('体检', 'Audit') },
     { id: 'check', label: L('查验', 'Check') },
     { id: 'scenarios', label: L('场景', 'Scenarios') },
-    { id: 'selfcheck', label: L('作者自检', 'Self-check') },
   ]
 
   let body: ReactNode
@@ -928,10 +848,8 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
     body = <AuditSection onPick={jumpToCheck} />
   } else if (section === 'check') {
     body = <CheckSection query={checkQuery} onQueryChange={setCheckQuery} result={check} onCheck={runCheck} />
-  } else if (section === 'scenarios') {
-    body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={jumpToCheck} />
   } else {
-    body = <SelfcheckSection />
+    body = <ScenariosSection doc={scenariosDoc} state={scenariosState} error={scenariosError} onPick={jumpToCheck} />
   }
 
   return (

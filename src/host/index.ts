@@ -13,10 +13,9 @@
  *   rows (no dimScores/drops).
  * - `GET /dsh-insights/audit?npm=a,b,c` — batch health lookup by npm package
  *   name (the「我的插件体检」page); each name maps to a trimmed card or null.
- * - `GET /dsh-insights/selfcheck?dir=<abs>` — author self-check of a local
- *   plugin directory: health-v5 scoring on the on-disk layout, read-only
- *   surface scan, npm consistency (the dsh-plugin-health CLI's --dir mode).
- * - `GET /dsh-insights/scenarios` — scenarios.json passthrough.
+ * - `GET /dsh-insights/scenarios` — scenarios.json, with each pick annotated
+ *   by its npm `pkgName` (joined from the corpus on `full_name`) so the
+ *   client can offer copyable install/uninstall commands.
  * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
  *
@@ -42,7 +41,6 @@ import {
   trimPlugin,
   type InsightsStore,
 } from './upstream.ts'
-import { SelfcheckError, runSelfcheck } from './selfcheck.ts'
 
 export const name = 'insights'
 
@@ -81,6 +79,23 @@ function wireError(code: string, message: string): WireError {
   return { code, message }
 }
 
+/** Loose shapes of scenarios.json — annotated opaquely, fields pass through. */
+interface ScenarioPickShape {
+  full_name?: string
+  pkgName?: string
+  [key: string]: unknown
+}
+
+interface ScenarioShape {
+  plugins?: ScenarioPickShape[]
+  [key: string]: unknown
+}
+
+interface ScenariosDocShape {
+  scenarios?: ScenarioShape[]
+  [key: string]: unknown
+}
+
 export function apply(raw: unknown): void {
   const ctx = raw as HostCtxLike
   const log = ctx.logger('insights')
@@ -97,7 +112,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,selfcheck,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,health} (read-only)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -173,13 +188,25 @@ async function handleRequest(
       })
       return
     }
-    if (pathname === `${PREFIX}/selfcheck`) {
-      const report = await runSelfcheck((url.searchParams.get('dir') ?? '').trim())
-      sendJson(res, 200, { ok: true, report })
-      return
-    }
     if (pathname === `${PREFIX}/scenarios`) {
-      sendJson(res, 200, { ok: true, scenarios: await store.scenarios() })
+      // Passthrough plus a `pkgName` annotation per pick (joined from the
+      // corpus on full_name, omitted when the corpus has no row) so the
+      // client can offer copyable `dsh plugin add/remove` commands. Response
+      // shape stays backward-compatible: picks only gain an optional field.
+      const doc = (await store.scenarios()) as ScenariosDocShape
+      const data = await store.insights()
+      const pkgByRepo = new Map<string, string>()
+      for (const p of data.plugins) {
+        if (p.pkgName) pkgByRepo.set(p.full_name.toLowerCase(), p.pkgName)
+      }
+      const scenarios = (doc.scenarios ?? []).map((scenario) => ({
+        ...scenario,
+        plugins: (scenario.plugins ?? []).map((plugin) => {
+          const pkgName = pkgByRepo.get((plugin.full_name ?? '').toLowerCase())
+          return pkgName ? { ...plugin, pkgName } : plugin
+        }),
+      }))
+      sendJson(res, 200, { ok: true, scenarios: { ...doc, scenarios } })
       return
     }
     if (pathname === `${PREFIX}/dynamics`) {
@@ -203,7 +230,6 @@ async function handleRequest(
           '/dsh-insights/plugin?full_name=owner/repo',
           '/dsh-insights/search?q=&limit=',
           '/dsh-insights/audit?npm=a,b,c',
-          '/dsh-insights/selfcheck?dir=/abs/path',
           '/dsh-insights/scenarios',
           '/dsh-insights/dynamics',
           '/dsh-insights/health',
@@ -216,11 +242,6 @@ async function handleRequest(
     if (error instanceof UpstreamError) {
       log.info('upstream fetch failed', error.url, error.message)
       sendJson(res, 502, { ok: false, error: wireError('upstream', error.message) })
-      return
-    }
-    if (error instanceof SelfcheckError) {
-      const status = error.code === 'not-a-directory' ? 404 : 400
-      sendJson(res, status, { ok: false, error: wireError(error.code, error.message) })
       return
     }
     log.info('request failed', url.pathname, (error as Error).message)

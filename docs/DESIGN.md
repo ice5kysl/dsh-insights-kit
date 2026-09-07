@@ -9,6 +9,7 @@ one Loader entry, two faces, one build.
 ```
 src/host/index.ts   ──build──▶ lib/index.js   (ESM, node; runtime deps: node builtins only)
 src/client/index.ts ──build──▶ lib/client.js  (CJS body in the window.__ModuleLoader__.load envelope)
+src/cli.ts          ──build──▶ lib/cli.js     (ESM, node + shebang; the `dsh-insights-kit` bin)
 ```
 
 - `package.json` `main`/`exports["."]` → host face; `exports["./client"]` +
@@ -47,8 +48,7 @@ isn't data traffic: a local Typert Remote call, see below.)
 | `/plugin?full_name=owner/repo` | One plugin's health card, trimmed: `full_name/stars/grade/score/dimScores/drops/npm/version/description/url`. Upstream drops are bare code strings; the host enriches them to `{code, sev, label:{zh,en}}` via the health-v5 rule table (`src/host/drops.ts`). 404 `not-in-corpus` when absent. |
 | `/search?q=&limit=20` | Case-insensitive substring match over `full_name` + `description`, ranked by stars desc; compact rows without `dimScores`/`drops`. Limit capped at 50. |
 | `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted. Comma-separated, capped at 100 names. |
-| `/selfcheck?dir=/abs/path` | Author self-check of a local plugin directory (see below). |
-| `/scenarios` | `scenarios.json` passthrough. |
+| `/scenarios` | `scenarios.json`, with each pick annotated by its npm `pkgName` (joined from the corpus on `full_name`, omitted when unknown) so the client can offer copyable install/uninstall commands. |
 | `/dynamics` | `dynamics.json` passthrough. |
 | `/health` | Liveness + per-document cache age/staleness. |
 
@@ -61,15 +61,19 @@ Upstream errors surface as `502 { ok:false, error:{code:'upstream'} }`;
 malformed input as 400; missing corpus entries as 404. All responses carry an
 `ok` envelope (`{ ok:true, ... }` / `{ ok:false, error:{code,message} }`).
 
-## Author self-check (`src/host/selfcheck.ts`)
+## Author self-check (`src/host/selfcheck.ts` + `src/cli.ts`)
 
-`/selfcheck?dir=<abs>` is the [dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health)
-CLI's `--dir` capability rebuilt on the host face:
+The author self-check is a **CLI**, not a panel section:
+`dsh-insights-kit selfcheck <dir> [--json] [--lang zh|en]` (the package's
+`bin` entry → `lib/cli.js`) wraps `runSelfcheck()` — the
+[dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health) CLI's
+`--dir` capability as a plain library function:
 
 - **Input validation**: the path must be absolute, contain no `..` segments,
   and resolve to an existing directory with a parseable `package.json`
-  (400 `invalid-path` / `no-package-json` / `bad-package-json`, 404
-  `not-a-directory`). Everything it reads stays under that directory.
+  (`invalid-path` / `no-package-json` / `bad-package-json` /
+  `not-a-directory` — CLI exit code 2). Everything it reads stays under that
+  directory.
 - **Scoring**: the health-v5 rulebook applied to the on-disk layout —
   manifest (`dsh.bundle.patch` declared + patch file present, `main =
   lib/index.js`, `exports["./client"]`, `files` whitelist, built `lib/`
@@ -89,9 +93,11 @@ CLI's `--dir` capability rebuilt on the host face:
   regex calls excluded via lookbehind), HTTP write verbs (`Map.delete` etc.
   excluded the same way), sanitization references and
   `dangerouslySetInnerHTML`. Informational only — never affects the score.
-- The report powers the「作者自检」panel section: score+grade card with a
-  shields.io badge-markdown preview, deductions grouped by category with fix
-  text, scan findings, npm line, and the uncovered-rules list.
+- **CLI output**: text mode prints score + grade, deductions grouped by
+  category with fix text (language from `--lang`, default `$LANG` zh* → 中文),
+  the scan summary, and the uncovered-rule codes; `--json` prints the full
+  report. Exit code is **1 when any fail-tier deduction exists**, else 0 —
+  usable as a CI pre-publish gate.
 
 ## Caching (`src/host/upstream.ts`)
 
@@ -126,25 +132,29 @@ uses, whose usage we verified in its source):
   the entry moved off `conversation.view`: the toolkit is session-independent,
   and the drawer is reachable from every screen, not only inside a session.
 
-Four capability sections, each fetching lazily on first visit:
+Three capability sections, each fetching lazily on first visit:
 
 1. **体检 Audit** — installed-plugin health check (see the enumeration note
    below): per-plugin grade badge + score, an S/A/B/C/D summary bar, npm
    version-drift badges (`npmLatest ≠ version`), "better alternatives ↗"
    links on C/D rows (to the plugin's dsh-insights.com page, which carries
-   same-category recommendations), and a BREAKING-release alert card fed by
-   `dynamics.json`. Unlisted plugins render as「未收录」rows.
+   same-category recommendations), a BREAKING-release alert card fed by
+   `dynamics.json`, and a copyable uninstall command per row. Unlisted
+   plugins render as「未收录」rows.
 2. **查验 Check** — `owner/repo` or pasted GitHub URL (`parseRepoInput`) →
    `/plugin` → health card: grade badge (S 紫/A 绿/B 蓝/C 橙/D 红), score,
    dimension bars, deduction list (severity-colored), npm-latest drift hint,
    link out to `https://dsh-insights.com/p/<owner>/<repo>/`;「不在权威集」
    notice on `not-in-corpus`. Rows in Audit/Scenarios jump here.
-3. **场景 Scenarios** — scenario cards with recommended plugin rows;
-   clicking a row jumps to Check with that plugin loaded.
-4. **作者自检 Self-check** — a local plugin directory path → `/selfcheck` →
-   report card (score + grade, shields.io badge markdown preview, deductions
-   grouped by category with fix guidance, read-only surface scan findings,
-   npm consistency, uncovered-rules list). Read-only; nothing is modified.
+3. **场景 Scenarios** — scenario cards with recommended plugin rows; each
+   row carries an「已安装」marker when the plugin is already installed (same
+   inventory → audit chain as Audit) and a copyable install/uninstall
+   command built from the host-annotated `pkgName`. Clicking a row jumps to
+   Check with that plugin loaded.
+
+The panel stays strictly read-only: install/uninstall is never performed
+in-app — the buttons only copy the `dsh plugin --profile web add/remove`
+command to the clipboard (run it in a terminal, then restart `dsh web`).
 
 ### Installed-plugin enumeration (research conclusion)
 
@@ -189,8 +199,10 @@ a fake npm registry, four fixture plugin directories, and a fake
 corpus 404, input validation, search matching/ranking/limits, the audit batch
 lookup (hit/null/case/400), the inventory-entry → npm-name mapping and
 filtering (imported from `src/shared/installed.ts`, node type-stripping),
-self-check (well-built S/100, skeletal plugin's full deduction set, write-
-surface scan kinds, npm drift/single/stale, path validation 400s and 404),
+the scenarios `pkgName` annotation, self-check as a library
+(`runSelfcheck()`: well-built S/100, skeletal plugin's full deduction set,
+write-surface scan kinds, npm drift/single/stale, path validation errors) and
+as a CLI subprocess (`lib/cli.js` exit codes 0/1/2, `--json`, `--help`),
 both passthroughs, cache health, the trust gate (403/200), upstream-failure →
 502, and cache isolation across instances. CI:
 `npm install → typecheck → build → smoke → npm pack --dry-run`.

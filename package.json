@@ -4,6 +4,9 @@
   "description": "dsh (DeepSeek Harness) plugin: the DSH Insights (dsh-insights.com) ecosystem assistant inside the dsh Web GUI — audit installed plugins, check health scores before installing, and discover plugins by scenario (host /dsh-insights routes on ctx.webServer + a sidebar footer action opening an overlay panel).",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "dsh-insights-kit": "./lib/cli.js"
+  },
   "files": [
     "lib",
     "cordis.patch.yml",

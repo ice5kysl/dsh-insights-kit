@@ -55,6 +55,9 @@ export interface ScenarioPlugin {
   npm?: string | null
   active?: boolean
   reasons?: string[]
+  /** npm package name, annotated host-side from the corpus (drives the
+   *  copyable install/uninstall command button); absent when unknown. */
+  pkgName?: string
 }
 
 export interface Scenario {
@@ -166,44 +169,6 @@ export async function fetchAudit(
   names: readonly string[],
 ): Promise<{ generatedAt: string | null; results: Record<string, PluginCard | null> }> {
   return getJson(`audit?npm=${encodeURIComponent(names.join(','))}`)
-}
-
-// ── author self-check (/dsh-insights/selfcheck) ──────────────────────────────
-
-export interface SelfcheckDrop {
-  code: string
-  sev: DropSeverity
-  label: { zh: string; en: string }
-  fix: { zh: string; en: string }
-}
-
-export interface SelfcheckReport {
-  dir: string
-  pkgName: string | null
-  version: string | null
-  score: number
-  grade: string
-  drops: SelfcheckDrop[]
-  uncovered: Array<{ code: string; reason: { zh: string; en: string } }>
-  scan: {
-    srcFiles: number
-    sanitizedRefs: number
-    dangerouslySetInnerHTML: boolean
-    hits: Array<{ file: string; kind: string; match: string }>
-    totalHits: number
-  }
-  npm: {
-    published: boolean
-    latest?: string | null
-    versions?: number
-    latestTime?: string | null
-    error?: string
-  } | null
-}
-
-/** Run the author self-check on a local plugin directory (absolute path). */
-export async function fetchSelfcheck(dir: string): Promise<{ report: SelfcheckReport }> {
-  return getJson(`selfcheck?dir=${encodeURIComponent(dir)}`)
 }
 
 /**
