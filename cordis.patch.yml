@@ -1,0 +1,11 @@
+# dsh-insights — bundle layer
+#
+# One Loader entry per package (the dsh client module system rejects multiple
+# active sources resolving to one package name), so the single `insights`
+# entry carries host apply (webServer 上的 /dsh-insights 只读路由), and the
+# same enabled entry's `dsh.client` metadata makes the browser load the
+# ./client face (会话内「生态」tab：注册进官方 conversation.view 视图环，
+# 排在对话/轨迹之后).
+- insert:
+    - id: insights
+      name: dsh-insights-plugin
