@@ -206,3 +206,27 @@ export function parseRepoInput(raw: string): string | null {
     return null
   }
 }
+
+// ── 查验 input routing (exact lookup vs corpus search) ───────────────────────
+
+export type CheckInput =
+  | { kind: 'exact'; fullName: string }
+  | { kind: 'search'; query: string }
+  | { kind: 'invalid' }
+
+/**
+ * Route the「查验」input: anything containing `/` (bare owner/repo or a
+ * GitHub URL) keeps the exact-lookup behavior; a bare word/phrase searches
+ * the corpus instead (substring match over full_name + description, host
+ * side). Slash-carrying input that parses to nothing stays `invalid` (the
+ * section shows its usual hint), same as before.
+ */
+export function classifyCheckInput(raw: string): CheckInput {
+  const input = raw.trim()
+  if (!input) return { kind: 'invalid' }
+  if (input.includes('/') || /^https?:\/\//i.test(input)) {
+    const fullName = parseRepoInput(input)
+    return fullName ? { kind: 'exact', fullName } : { kind: 'invalid' }
+  }
+  return { kind: 'search', query: input }
+}

@@ -157,11 +157,16 @@ Three capability sections, each fetching lazily on first visit (tab order:
    inventory → audit chain as Audit) and a copyable install/uninstall
    command built from the host-annotated `pkgName`. Clicking a row jumps to
    Check with that plugin loaded.
-3. **查验 Check** — `owner/repo` or pasted GitHub URL (`parseRepoInput`) →
-   `/plugin` → health card: grade badge (S 紫/A 绿/B 蓝/C 橙/D 红), score,
-   dimension bars, deduction list (severity-colored), npm-latest drift hint,
-   link out to `https://dsh-insights.com/p/<owner>/<repo>/`;「不在权威集」
-   notice on `not-in-corpus`. Rows in Audit/Scenarios jump here.
+3. **查验 Check** — input routed by `classifyCheckInput`: `owner/repo` or a
+   pasted GitHub URL (`parseRepoInput`) → `/plugin` → health card (grade
+   badge S 紫/A 绿/B 蓝/C 橙/D 红, score, dimension bars, severity-colored
+   deduction list, npm-latest drift hint, link out to
+   `https://dsh-insights.com/p/<owner>/<repo>/`); a bare keyword (no `/`) →
+   `/search`, a debounced (300 ms) corpus search list (grade badge + stars +
+   truncated description per row, stale in-flight responses discarded via a
+   generation counter), each hit loading its card on click. A
+   「不在权威集」miss auto-searches the repo name once and lists similar
+   plugins under the notice. Rows in Audit/Scenarios jump here.
 
 The panel stays strictly read-only: install/uninstall is never performed
 in-app — the buttons only copy the `dsh plugin --profile web add/remove`
@@ -215,7 +220,8 @@ lookup (hit/null/case/400) with its compat slice (engines.dsh + ≤3 peers),
 the runtime-version probe shape, the inventory-entry → npm-name mapping and
 filtering incl. pseudo-entry/link: handling (imported from
 `src/shared/installed.ts`, node type-stripping), the conservative ^/~ range
-check (`src/shared/compat.ts`), the scenarios `pkgName` annotation,
+check (`src/shared/compat.ts`), the scenarios `pkgName` annotation, the
+查验 input router (`classifyCheckInput` from `src/client/api.ts`),
 self-check as a library (`runSelfcheck()`: well-built S/100, skeletal
 plugin's full deduction set, write-surface scan kinds, npm
 drift/single/stale, path validation errors) and as a CLI subprocess

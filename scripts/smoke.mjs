@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
+import { classifyCheckInput } from '../src/client/api.ts'
 import { SelfcheckError, runSelfcheck } from '../src/host/selfcheck.ts'
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -392,6 +393,28 @@ await check('search limit honored', async () => {
 await check('empty search query -> 400', async () => {
   const { status } = await getJson('/search?q=')
   if (status !== 400) throw new Error(`status ${status}`)
+})
+
+await check('classifyCheckInput: slash/URL → exact, bare word → search, junk → invalid', async () => {
+  const cases = [
+    // [input, kind, payload]
+    ['aaa/dsh-alpha', 'exact', 'aaa/dsh-alpha'],
+    ['  aaa/dsh-alpha  ', 'exact', 'aaa/dsh-alpha'],
+    ['https://github.com/aaa/dsh-alpha', 'exact', 'aaa/dsh-alpha'],
+    ['github.com/aaa/dsh-alpha.git', 'exact', 'aaa/dsh-alpha'],
+    ['market', 'search', 'market'],
+    ['session archive', 'search', 'session archive'],
+    ['foo/bar/baz', 'invalid', undefined],
+    ['https://gitlab.com/aaa/dsh-alpha', 'invalid', undefined],
+    ['', 'invalid', undefined],
+    ['   ', 'invalid', undefined],
+  ]
+  for (const [input, kind, payload] of cases) {
+    const got = classifyCheckInput(input)
+    if (got.kind !== kind) throw new Error(`classifyCheckInput(${JSON.stringify(input)}).kind = ${got.kind}, want ${kind}`)
+    if (kind === 'exact' && got.fullName !== payload) throw new Error(`exact payload wrong for ${input}: ${got.fullName}`)
+    if (kind === 'search' && got.query !== payload) throw new Error(`search payload wrong for ${input}: ${got.query}`)
+  }
 })
 
 await check('audit maps known npm names to cards, unknown to null', async () => {

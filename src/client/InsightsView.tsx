@@ -20,9 +20,11 @@
  *    + advised actions.
  * 2. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
  *    jumps to Check with it loaded.
- * 3. 查验 Check      — paste `owner/repo` or a GitHub URL, get the plugin's
- *    health card (grade badge, score, dimension bars, deduction list, link
- *    out to the full page on dsh-insights.com).
+ * 3. 查验 Check      — paste `owner/repo` / a GitHub URL for the exact health
+ *    card (grade badge, score, dimension bars, deduction list, link out to
+ *    the full page on dsh-insights.com), or type a bare keyword to search
+ *    the corpus (debounced substring match; a missed exact lookup auto-lists
+ *    similar plugins by repo name).
  *
  * All data flows through the host `/dsh-insights` surface; the client never
  * talks to dsh-insights.com directly. Bilingual zh/en with the same toggle
@@ -31,15 +33,16 @@
  * @module dsh-insights-kit/insights-view
  */
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   ApiError,
+  classifyCheckInput,
   fetchAudit,
   fetchDynamics,
   fetchPlugin,
   fetchRuntime,
   fetchScenarios,
-  parseRepoInput,
+  searchPlugins,
   type DynamicsDoc,
   type DropSeverity,
   type PluginCard,
@@ -47,6 +50,7 @@ import {
   type ReleaseRow,
   type Scenario,
   type ScenariosDoc,
+  type SearchHit,
 } from './api.ts'
 import { getInventoryLister, installedPluginNames, npmNameOfModule } from './inventory.ts'
 import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
@@ -558,6 +562,48 @@ interface CheckState {
   error?: unknown
 }
 
+interface SearchListState {
+  state: LoadState
+  query: string
+  results: SearchHit[]
+  total: number
+  error?: unknown
+}
+
+/** One search/similar result row; clicking loads the plugin's health card. */
+function SearchHitRow({ hit, onPick }: { hit: SearchHit; onPick: (fullName: string) => void }): JSX.Element {
+  return (
+    <li>
+      <button
+        onClick={() => onPick(hit.full_name)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          width: '100%',
+          textAlign: 'left',
+          border: 'none',
+          background: 'none',
+          padding: '4px 0',
+          cursor: 'pointer',
+          color: 'inherit',
+          fontSize: 13,
+        }}
+        title={L('打开健康卡', 'Open the health card')}
+      >
+        <GradeBadge grade={hit.grade} />
+        <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{hit.full_name}</span>
+        <Stars n={hit.stars} />
+        {hit.description && (
+          <span style={{ ...mutedStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {hit.description}
+          </span>
+        )}
+      </button>
+    </li>
+  )
+}
+
 function CheckSection(props: {
   query: string
   onQueryChange: (q: string) => void
@@ -567,21 +613,88 @@ function CheckSection(props: {
   const { query, onQueryChange, result, onCheck } = props
   const [input, setInput] = useState(query)
   const [hint, setHint] = useState('')
+  const [search, setSearch] = useState<SearchListState>({ state: 'idle', query: '', results: [], total: 0 })
+  const [similar, setSimilar] = useState<SearchHit[]>([])
+  // Generation counter discards stale in-flight search responses;
+  // lastSearched dedupes repeat fetches of the same query.
+  const searchGen = useRef(0)
+  const lastSearched = useRef('')
 
   useEffect(() => {
     if (query) setInput(query)
   }, [query])
 
-  function submit(): void {
-    const parsed = parseRepoInput(input)
-    if (!parsed) {
-      setHint(L('请输入 owner/repo 或 GitHub 仓库 URL', 'Enter owner/repo or a GitHub repository URL'))
+  function runSearch(q: string): void {
+    if (lastSearched.current === q) return
+    lastSearched.current = q
+    const gen = ++searchGen.current
+    setSearch({ state: 'loading', query: q, results: [], total: 0 })
+    searchPlugins(q)
+      .then((res) => {
+        if (searchGen.current === gen) setSearch({ state: 'ready', query: q, results: res.results, total: res.total })
+      })
+      .catch((error: unknown) => {
+        if (lastSearched.current === q) lastSearched.current = ''
+        if (searchGen.current === gen) setSearch({ state: 'error', query: q, results: [], total: 0, error })
+      })
+  }
+
+  // Debounced corpus search: bare words/phrases (no slash) search as you
+  // type, 300ms after the last keystroke; slash-carrying input (owner/repo,
+  // GitHub URL) keeps the exact-lookup path and never triggers a search.
+  useEffect(() => {
+    const classified = classifyCheckInput(input)
+    if (classified.kind !== 'search') return
+    const timer = setTimeout(() => runSearch(classified.query), 300)
+    return () => clearTimeout(timer)
+  }, [input])
+
+  // Exact lookup missed the corpus → one automatic search by repo name,
+  // rendered as「相似插件」under the notice (only when non-empty).
+  useEffect(() => {
+    if (!result.notInCorpus || !query.includes('/')) {
+      setSimilar([])
       return
     }
-    setHint('')
-    onQueryChange(parsed)
-    onCheck(parsed)
+    const repo = query.split('/').pop() ?? ''
+    if (!repo) {
+      setSimilar([])
+      return
+    }
+    let cancelled = false
+    searchPlugins(repo)
+      .then((res) => {
+        if (!cancelled) setSimilar(res.results)
+      })
+      .catch(() => {
+        if (!cancelled) setSimilar([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [result.notInCorpus, query])
+
+  function submit(): void {
+    const classified = classifyCheckInput(input)
+    if (classified.kind === 'exact') {
+      setHint('')
+      onQueryChange(classified.fullName)
+      onCheck(classified.fullName)
+    } else if (classified.kind === 'search') {
+      setHint('')
+      runSearch(classified.query)
+    } else {
+      setHint(L('请输入 owner/repo、GitHub 仓库 URL 或搜索关键词', 'Enter owner/repo, a GitHub repository URL, or search keywords'))
+    }
   }
+
+  function pickPlugin(fullName: string): void {
+    onQueryChange(fullName)
+    onCheck(fullName)
+  }
+
+  const classified = classifyCheckInput(input)
+  const searchQuery = classified.kind === 'search' ? classified.query : null
 
   return (
     <div>
@@ -589,7 +702,7 @@ function CheckSection(props: {
         <input
           style={inputStyle}
           value={input}
-          placeholder={L('owner/repo 或 https://github.com/owner/repo', 'owner/repo or https://github.com/owner/repo')}
+          placeholder={L('owner/repo、GitHub URL 或关键词（如 market）', 'owner/repo, a GitHub URL, or keywords (e.g. market)')}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') submit()
@@ -607,23 +720,64 @@ function CheckSection(props: {
         )}
       </div>
 
-      {result.state === 'error' && <ErrorNote error={result.error} />}
-
-      {result.notInCorpus && (
-        <div style={cardStyle}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {L('不在权威集', 'Not in the authoritative corpus')}
-          </div>
-          <div style={mutedStyle}>
-            {L(
-              'dsh-insights.com 的权威集中没有收录该仓库——它可能不是 dsh 插件、太新尚未被增量发现收录，或未满足收录门槛。',
-              'This repository is not in the dsh-insights.com corpus — it may not be a dsh plugin, may be too new for incremental discovery, or may not meet the listing bar.',
-            )}
-          </div>
+      {searchQuery !== null ? (
+        <div>
+          {search.state === 'loading' && <div style={mutedStyle}>{L('搜索中…', 'Searching…')}</div>}
+          {search.state === 'error' && <ErrorNote error={search.error} />}
+          {search.state === 'ready' && search.query === searchQuery && (
+            <div>
+              <div style={{ ...mutedStyle, marginBottom: 8 }}>
+                {L('搜索“{q}”· 命中 {n} 个', 'Search "{q}" · {n} hit(s)', { q: search.query, n: search.total })}
+              </div>
+              {search.results.length === 0 ? (
+                <div style={cardStyle}>
+                  <div style={mutedStyle}>{L('无匹配插件', 'No matching plugins')}</div>
+                </div>
+              ) : (
+                <div style={cardStyle}>
+                  <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+                    {search.results.map((hit) => (
+                      <SearchHitRow key={hit.full_name} hit={hit} onPick={pickPlugin} />
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
+      ) : (
+        <>
+          {result.state === 'error' && <ErrorNote error={result.error} />}
 
-      {result.card && <HealthCard card={result.card} generatedAt={result.generatedAt} />}
+          {result.notInCorpus && (
+            <div style={cardStyle}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                {L('不在权威集', 'Not in the authoritative corpus')}
+              </div>
+              <div style={mutedStyle}>
+                {L(
+                  'dsh-insights.com 的权威集中没有收录该仓库——它可能不是 dsh 插件、太新尚未被增量发现收录，或未满足收录门槛。',
+                  'This repository is not in the dsh-insights.com corpus — it may not be a dsh plugin, may be too new for incremental discovery, or may not meet the listing bar.',
+                )}
+              </div>
+              {similar.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 12 }}>
+                    {L('相似插件', 'Similar plugins')}
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+                    {similar.map((hit) => (
+                      <SearchHitRow key={hit.full_name} hit={hit} onPick={pickPlugin} />
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {result.card && <HealthCard card={result.card} generatedAt={result.generatedAt} />}
+        </>
+      )}
     </div>
   )
 }
