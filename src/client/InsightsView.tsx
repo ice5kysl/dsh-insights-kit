@@ -355,6 +355,8 @@ interface AuditState {
   rows?: AuditRow[]
   /** In-box @deepseek-ai/* bundles in the profile (context, not audited). */
   baseline?: number
+  /** Installed but disabled (not in the bundles load list) — not audited. */
+  disabled?: number
   /** The profile the inventory was read from (drives uninstall commands). */
   profile?: string
   dynamics?: DynamicsDoc
@@ -422,18 +424,23 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
         return
       }
       // List first: render the manifest rows immediately (cached cards where
-      // the installed version is unchanged), then audit the rest in one batch.
-      const rows: AuditRow[] = inventory.plugins.map((plugin: InstalledPlugin) => ({
-        name: plugin.name,
-        version: plugin.version,
-        plugin: plugin.plugin,
-        card: auditCacheRead(plugin.name, plugin.version),
-      }))
+      // the installed version is unchanged), then audit the rest in one
+      // batch. Disabled entries (installed but out of the bundles load list)
+      // are not audited — they do not load.
+      const rows: AuditRow[] = inventory.plugins
+        .filter((plugin: InstalledPlugin) => plugin.enabled)
+        .map((plugin: InstalledPlugin) => ({
+          name: plugin.name,
+          version: plugin.version,
+          plugin: plugin.plugin,
+          card: auditCacheRead(plugin.name, plugin.version),
+        }))
       if (cancelled) return
       setAudit({
         form: 'full',
         rows,
         baseline: inventory.baseline,
+        disabled: inventory.plugins.length - rows.length,
         profile: inventory.profile,
         dynamics,
         dshVersion,
@@ -559,6 +566,11 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
           {typeof audit.baseline === 'number' && audit.baseline > 0 && (
             <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
               {L('另有 {m} 个官方基线模块（设置 → 插件里能看到）不参与体检', 'plus {m} official baseline modules (visible under Settings → Plugins), not audited', { m: audit.baseline })}
+            </span>
+          )}
+          {typeof audit.disabled === 'number' && audit.disabled > 0 && (
+            <span style={{ ...mutedStyle, fontWeight: 400, marginLeft: 8 }}>
+              {L('{m} 个已禁用未列出', '{m} disabled, not listed', { m: audit.disabled })}
             </span>
           )}
         </div>

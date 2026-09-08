@@ -263,21 +263,36 @@ writeTree(driftDir, {
   'src/index.ts': 'export const x = 1\n',
 })
 
-// Fixture dsh profile for GET /dsh-insights/installed: two in-box bundles
-// (baseline), two materialized plugins (dsh vs cordis manifest field), one
-// declared-but-not-installed dep (version null), one plain utility dep
-// (plugin: false). Read per request from DSH_INSIGHTS_PROFILE_DIR.
+// Fixture dsh profile for GET /dsh-insights/installed: one in-box bundle in
+// deps + one bundles-only (baseline 2), two materialized plugins (dsh vs
+// cordis manifest field), one declared-but-not-installed dep (version null),
+// one plain utility dep (plugin: false), one disabled dep (not in the
+// bundles load list), one bundles-only community row. Read per request from
+// DSH_INSIGHTS_PROFILE_DIR.
 const profileFixture = join(fixtureRoot, 'profile-web')
 writeTree(profileFixture, {
   'package.json': JSON.stringify({
     name: 'dsh-profile-web',
     dependencies: {
       '@deepseek-ai/dsh-base': '0.1.2-rc.1',
-      '@deepseek-ai/dsh-web-app': '0.1.2-rc.1',
       'dsh-alpha': '^1.0.0',
       'dsh-beta': '^2.1.0',
       'dsh-pending': '^0.1.0',
       'plain-util': '^3.0.0',
+      'dsh-disabled': '^0.4.0',
+    },
+    dsh: {
+      profile: {
+        bundles: [
+          '@deepseek-ai/dsh-base',
+          '@deepseek-ai/dsh-web-app',
+          'dsh-alpha',
+          'dsh-beta',
+          'dsh-pending',
+          'plain-util',
+          'dsh-bundle-only',
+        ],
+      },
     },
   }, null, 2),
   'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
@@ -532,15 +547,26 @@ await check('installed reads the profile manifest (baseline filtered, versions r
   if (body.profile !== 'web') throw new Error(`profile wrong: ${body.profile}`)
   if (body.baseline !== 2) throw new Error(`baseline wrong: ${body.baseline}`)
   const rows = body.plugins
-  if (!Array.isArray(rows) || rows.length !== 4) throw new Error(`rows wrong: ${JSON.stringify(rows)}`)
-  if (rows.map((r) => r.name).join(',') !== 'dsh-alpha,dsh-beta,dsh-pending,plain-util') {
-    throw new Error(`rows not sorted/filtered right: ${JSON.stringify(rows.map((r) => r.name))}`)
+  if (!Array.isArray(rows) || rows.length !== 6) throw new Error(`rows wrong: ${JSON.stringify(rows)}`)
+  const names = rows.map((r) => r.name).join(',')
+  if (names !== 'dsh-alpha,dsh-beta,dsh-bundle-only,dsh-disabled,dsh-pending,plain-util') {
+    throw new Error(`rows not sorted/filtered right: ${names}`)
   }
-  const [alpha, beta, pending, util] = rows
-  if (alpha.version !== '1.0.0' || alpha.plugin !== true || alpha.spec !== '^1.0.0') throw new Error(`alpha row wrong: ${JSON.stringify(alpha)}`)
-  if (beta.version !== '2.1.0' || beta.plugin !== true) throw new Error(`beta row wrong: ${JSON.stringify(beta)}`)
-  if (pending.version !== null || pending.plugin !== false) throw new Error(`pending row wrong: ${JSON.stringify(pending)}`)
-  if (util.version !== '3.2.1' || util.plugin !== false) throw new Error(`util row wrong: ${JSON.stringify(util)}`)
+  const byName = Object.fromEntries(rows.map((r) => [r.name, r]))
+  const alpha = byName['dsh-alpha']
+  if (alpha.version !== '1.0.0' || alpha.plugin !== true || alpha.spec !== '^1.0.0' || alpha.enabled !== true) {
+    throw new Error(`alpha row wrong: ${JSON.stringify(alpha)}`)
+  }
+  const beta = byName['dsh-beta']
+  if (beta.version !== '2.1.0' || beta.plugin !== true || beta.enabled !== true) throw new Error(`beta row wrong: ${JSON.stringify(beta)}`)
+  const pending = byName['dsh-pending']
+  if (pending.version !== null || pending.plugin !== false || pending.enabled !== true) throw new Error(`pending row wrong: ${JSON.stringify(pending)}`)
+  const util = byName['plain-util']
+  if (util.version !== '3.2.1' || util.plugin !== false || util.enabled !== true) throw new Error(`util row wrong: ${JSON.stringify(util)}`)
+  const bundleOnly = byName['dsh-bundle-only']
+  if (bundleOnly.spec !== '' || bundleOnly.enabled !== true) throw new Error(`bundle-only row wrong: ${JSON.stringify(bundleOnly)}`)
+  const disabled = byName['dsh-disabled']
+  if (disabled.enabled !== false) throw new Error(`disabled row wrong: ${JSON.stringify(disabled)}`)
 })
 
 await check('installed degrades to an empty inventory when the profile dir is missing', async () => {

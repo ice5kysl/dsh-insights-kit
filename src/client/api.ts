@@ -195,6 +195,8 @@ export interface InstalledPlugin {
   version: string | null
   /** Carries a dsh/cordis manifest field (loads as a plugin). */
   plugin: boolean
+  /** In the manifest's `dsh.profile.bundles` load list (true when no bundles field). */
+  enabled: boolean
 }
 
 /**

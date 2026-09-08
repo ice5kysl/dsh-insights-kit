@@ -40,12 +40,18 @@ const INBOX_BUNDLES = new Set([
 export interface InstalledPluginRow {
   /** npm package name as declared in the profile manifest. */
   name: string
-  /** Version range spec from the profile manifest (e.g. `^1.2.3`, `link:…`). */
+  /** Version range spec from the profile manifest (`^1.2.3`, `link:…`; empty for bundle-only rows). */
   spec: string
   /** Installed version from node_modules, null when not materialized. */
   version: string | null
   /** Carries a dsh/cordis manifest field (i.e. loads as a plugin). */
   plugin: boolean
+  /**
+   * Present in the manifest's `dsh.profile.bundles` load list. When the
+   * manifest declares no bundles field at all, every dep counts as enabled
+   * (older profile shapes load every dependency).
+   */
+  enabled: boolean
 }
 
 export interface InstalledInventory {
@@ -135,16 +141,36 @@ export function readInstalledInventory(
   const empty: InstalledInventory = { profile, baseline: 0, plugins: [] }
   const manifest = readJson(join(dir, 'package.json'))
   if (manifest === null) return empty
+
+  // The load list: `dsh.profile.bundles` when declared (in-box bundles live
+  // there and possibly ONLY there), otherwise every dependency loads.
+  const dshField = manifest.dsh
+  const bundlesRaw = typeof dshField === 'object' && dshField !== null && !Array.isArray(dshField)
+    ? (dshField as Record<string, unknown>).profile
+    : undefined
+  const bundlesValue = typeof bundlesRaw === 'object' && bundlesRaw !== null && !Array.isArray(bundlesRaw)
+    ? (bundlesRaw as Record<string, unknown>).bundles
+    : undefined
+  const bundles = Array.isArray(bundlesValue)
+    ? new Set(bundlesValue.filter((name): name is string => typeof name === 'string'))
+    : null
+
   const deps = manifest.dependencies
-  if (typeof deps !== 'object' || deps === null || Array.isArray(deps)) return empty
+  const depEntries = typeof deps === 'object' && deps !== null && !Array.isArray(deps)
+    ? Object.entries(deps as Record<string, unknown>)
+    : []
 
   const plugins: InstalledPluginRow[] = []
+  const seen = new Set<string>()
   let baseline = 0
-  for (const [name, spec] of Object.entries(deps as Record<string, unknown>)) {
-    if (INBOX_BUNDLES.has(name)) {
-      baseline += 1
-      continue
-    }
+
+  // In-box bundles count as the baseline from EITHER the dependencies or the
+  // bundles list (different profile shapes place them differently).
+  for (const name of INBOX_BUNDLES) {
+    if (bundles?.has(name) || depEntries.some(([dep]) => dep === name)) baseline += 1
+  }
+
+  const rowFor = (name: string, spec: string): InstalledPluginRow => {
     let version: string | null = null
     let plugin = false
     const pkgPath = join(dir, 'node_modules', name, 'package.json')
@@ -157,7 +183,21 @@ export function readInstalledInventory(
         plugin = pkg.dsh !== undefined || pkg.cordis !== undefined
       }
     }
-    plugins.push({ name, spec: typeof spec === 'string' ? spec : '', version, plugin })
+    return { name, spec, version, plugin, enabled: bundles === null || bundles.has(name) }
+  }
+
+  for (const [name, spec] of depEntries) {
+    if (INBOX_BUNDLES.has(name)) continue
+    seen.add(name)
+    plugins.push(rowFor(name, typeof spec === 'string' ? spec : ''))
+  }
+  // Bundle-only entries (loaded but not a manifest dependency — e.g. seeded
+  // by a profile template) get a row too, with an empty spec.
+  if (bundles !== null) {
+    for (const name of bundles) {
+      if (INBOX_BUNDLES.has(name) || seen.has(name)) continue
+      plugins.push(rowFor(name, ''))
+    }
   }
   plugins.sort((a, b) => a.name.localeCompare(b.name))
   return { profile, baseline, plugins }
