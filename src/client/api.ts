@@ -187,6 +187,30 @@ export async function fetchRuntime(): Promise<{ dsh: { version: string | null } 
   return getJson('runtime')
 }
 
+/** One installed-plugin row of the active profile (host-side manifest read). */
+export interface InstalledPlugin {
+  name: string
+  spec: string
+  /** Installed version from the profile's node_modules, null when pending. */
+  version: string | null
+  /** Carries a dsh/cordis manifest field (loads as a plugin). */
+  plugin: boolean
+}
+
+/**
+ * The active profile's installed plugins, read host-side from the profile
+ * manifest (the same seam `dsh plugin add` operates on). Always available on
+ * any build — no Remote namespace involved.
+ */
+export async function fetchInstalled(): Promise<{
+  profile: string
+  /** Count of in-box @deepseek-ai/* bundles in the manifest. */
+  baseline: number
+  plugins: InstalledPlugin[]
+}> {
+  return getJson('installed')
+}
+
 /** Batch health lookup by npm package names; unlisted names map to null. */
 export async function fetchAudit(
   names: readonly string[],

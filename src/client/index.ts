@@ -10,12 +10,10 @@
  *   the app (click-through until it opts into pointer events), hosting the
  *   three capability sections 体检 / 查验 / 场景.
  *
- * Also resolves the official `pluginInventory` Remote namespace (pre-mounted
- * by standard web builds via dsh-api-remotes) for the 体检 section via a
- * child fiber parked on the dependency — cordis guards un-injected service
- * reads with a throw, and a hard inject would park the whole panel on builds
- * without the namespace; builds without it degrade the 体检 page to the
- * version/compatibility reminder form, never breaking the rest of the panel.
+ * Installed-plugin enumeration does NOT touch any cordis service: the 体检 /
+ * 场景 / 查验 sections all read the active profile's manifest through the
+ * plugin's own host route (`/dsh-insights/installed`, see src/host), so this
+ * face only depends on the `slots` service.
  *
  * The same Loader entry carries the host face (`lib/index.js`, the
  * /dsh-insights routes), so this module ships as the package's `./client`
@@ -26,11 +24,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { InsightsPanel } from './InsightsView.tsx'
-import { mountInventory, setInventoryLister, type RemoteLike } from './inventory.ts'
 import { SidebarAction } from './SidebarAction.tsx'
 
 export const name = 'insights'
-export const inject = ['slots', 'remote'] as const
+export const inject = ['slots'] as const
 
 /** Minimal service faces this plugin consumes (typed locally at the boundary). */
 interface SlotsLike {
@@ -43,19 +40,11 @@ interface SlotsLike {
 interface ClientCtxLike {
   logger(name: string): { info(...parts: unknown[]): void }
   slots: SlotsLike
-  remote: RemoteLike
-  inject(names: string[], cb: (ctx: { remote: RemoteLike }) => void): unknown
 }
 
 export function apply(raw: Context): void {
   const ctx = raw as unknown as ClientCtxLike
   const log = ctx.logger('insights:client')
-
-  // Inventory resolution parks a child fiber on `remote.pluginInventory`
-  // (bounded wait, never rejects): slot components get no ctx, so stash the
-  // promise for the 体检 section (null = enumeration unavailable → degraded
-  // page). Never blocks the panel's other sections.
-  setInventoryLister(mountInventory(ctx))
 
   ctx.slots.inject('sidebar.footer.action', () =>
     ctx.slots.register(

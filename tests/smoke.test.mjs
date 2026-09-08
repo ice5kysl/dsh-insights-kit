@@ -10,11 +10,13 @@
  *
  * then exercises trimming, drop enrichment, search matching/ranking/limits,
  * scenarios pkgName annotation, the audit compat slice, the runtime-version
- * probe, passthrough, cache health, the trust gate, and the
- * upstream-failure → 502 path (a second apply pointed at a dead port with an
- * empty cache). The author self-check is tested as a library
- * (runSelfcheck from src/host/selfcheck.ts, imported via node type-stripping)
- * and as a CLI subprocess (lib/cli.js exit codes 0/1/2).
+ * probe, the profile-manifest installed inventory (baseline filtering,
+ * version resolution, missing-dir degradation), passthrough, cache health,
+ * the trust gate, and the upstream-failure → 502 path (a second apply
+ * pointed at a dead port with an empty cache). The author self-check is
+ * tested as a library (runSelfcheck from src/host/selfcheck.ts, imported via
+ * node type-stripping) and as a CLI subprocess (lib/cli.js exit codes
+ * 0/1/2).
  *
  * Run: npm run build && node tests/smoke.test.mjs   (from the plugin directory)
  */
@@ -261,6 +263,29 @@ writeTree(driftDir, {
   'src/index.ts': 'export const x = 1\n',
 })
 
+// Fixture dsh profile for GET /dsh-insights/installed: two in-box bundles
+// (baseline), two materialized plugins (dsh vs cordis manifest field), one
+// declared-but-not-installed dep (version null), one plain utility dep
+// (plugin: false). Read per request from DSH_INSIGHTS_PROFILE_DIR.
+const profileFixture = join(fixtureRoot, 'profile-web')
+writeTree(profileFixture, {
+  'package.json': JSON.stringify({
+    name: 'dsh-profile-web',
+    dependencies: {
+      '@deepseek-ai/dsh-base': '0.1.2-rc.1',
+      '@deepseek-ai/dsh-web-app': '0.1.2-rc.1',
+      'dsh-alpha': '^1.0.0',
+      'dsh-beta': '^2.1.0',
+      'dsh-pending': '^0.1.0',
+      'plain-util': '^3.0.0',
+    },
+  }, null, 2),
+  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+  'node_modules/dsh-beta/package.json': JSON.stringify({ name: 'dsh-beta', version: '2.1.0', cordis: {} }),
+  'node_modules/plain-util/package.json': JSON.stringify({ name: 'plain-util', version: '3.2.1' }),
+})
+process.env.DSH_INSIGHTS_PROFILE_DIR = profileFixture
+
 // Identical to good-plugin but without engines.dsh — isolates the zero-weight
 // hint: the score must stay 100/S and the CLI exit code 0.
 const { engines: _omitEngines, ...GOOD_NO_ENGINES } = GOOD_PKG
@@ -499,6 +524,37 @@ await check('runtime reports the running dsh version shape (null when unresolvab
   // installed, so resolution must fail cleanly to null; inside a real dsh
   // profile it is a version string. Accept both, assert the shape.
   if (version !== null && typeof version !== 'string') throw new Error(`version wrong: ${JSON.stringify(version)}`)
+})
+
+await check('installed reads the profile manifest (baseline filtered, versions resolved, sorted)', async () => {
+  const { status, body } = await getJson('/installed')
+  if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+  if (body.profile !== 'web') throw new Error(`profile wrong: ${body.profile}`)
+  if (body.baseline !== 2) throw new Error(`baseline wrong: ${body.baseline}`)
+  const rows = body.plugins
+  if (!Array.isArray(rows) || rows.length !== 4) throw new Error(`rows wrong: ${JSON.stringify(rows)}`)
+  if (rows.map((r) => r.name).join(',') !== 'dsh-alpha,dsh-beta,dsh-pending,plain-util') {
+    throw new Error(`rows not sorted/filtered right: ${JSON.stringify(rows.map((r) => r.name))}`)
+  }
+  const [alpha, beta, pending, util] = rows
+  if (alpha.version !== '1.0.0' || alpha.plugin !== true || alpha.spec !== '^1.0.0') throw new Error(`alpha row wrong: ${JSON.stringify(alpha)}`)
+  if (beta.version !== '2.1.0' || beta.plugin !== true) throw new Error(`beta row wrong: ${JSON.stringify(beta)}`)
+  if (pending.version !== null || pending.plugin !== false) throw new Error(`pending row wrong: ${JSON.stringify(pending)}`)
+  if (util.version !== '3.2.1' || util.plugin !== false) throw new Error(`util row wrong: ${JSON.stringify(util)}`)
+})
+
+await check('installed degrades to an empty inventory when the profile dir is missing', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = join(fixtureRoot, 'no-such-profile')
+  try {
+    const { status, body } = await getJson('/installed')
+    if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+    if (body.baseline !== 0 || !Array.isArray(body.plugins) || body.plugins.length !== 0) {
+      throw new Error(`empty inventory expected: ${JSON.stringify(body)}`)
+    }
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
 })
 
 await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {

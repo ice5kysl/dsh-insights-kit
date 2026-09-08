@@ -23,6 +23,11 @@
  * - `GET /dsh-insights/runtime`   — the running dsh version (resolved from
  *   the installed @deepseek-ai/dsh-web-app / dsh-base package.json; null
  *   when not resolvable).
+ * - `GET /dsh-insights/installed` — the active profile's installed plugins,
+ *   read straight from the profile manifest (`~/.dsh/profiles/<profile>`,
+ *   the same seam `dsh plugin add` operates on): name + spec + installed
+ *   version + plugin-flag per row, plus the in-box baseline count. Local
+ *   filesystem only, no upstream fetch; never blocks on a Remote namespace.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
  *
  * Every request passes a host-trust gate mirroring the official /api fence:
@@ -40,6 +45,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
+import { readInstalledInventory } from './installed.ts'
 import {
   UpstreamError,
   auditByNpm,
@@ -147,7 +153,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,health} (read-only)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -276,6 +282,13 @@ async function handleRequest(
       sendJson(res, 200, { ok: true, dsh: { version: dshVersion() } })
       return
     }
+    if (pathname === `${PREFIX}/installed`) {
+      // Local-only (no upstream fetch): the active profile's installed
+      // plugins, read from the profile manifest on every request so plugin
+      // add/remove is reflected on the next panel open.
+      sendJson(res, 200, { ok: true, ...readInstalledInventory() })
+      return
+    }
     if (pathname === `${PREFIX}/health`) {
       sendJson(res, 200, {
         ok: true,
@@ -296,6 +309,7 @@ async function handleRequest(
           '/dsh-insights/scenarios',
           '/dsh-insights/dynamics',
           '/dsh-insights/runtime',
+          '/dsh-insights/installed',
           '/dsh-insights/health',
         ],
       })

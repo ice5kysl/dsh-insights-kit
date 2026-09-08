@@ -10,14 +10,18 @@
  *
  * Three capability sections, switched by an inner tab strip:
  *
- * 1. 体检 Audit      — enumerates installed plugins through the official
- *    pluginInventory Remote, health-checks them against the corpus in one
- *    batch (grade badge + score per row, S/A/B/C/D summary bar, npm
- *    version-drift hints, per-row dsh-compat signal from compat.json, C/D
- *    rows link to on-site alternatives), plus a running-vs-latest dsh
- *    version line and a BREAKING-release warning card. Builds without the
- *    inventory gateway get the degraded form: dist-tags + breaking releases
- *    + advised actions.
+ * 1. 体检 Audit      — enumerates installed plugins from the active
+ *    profile's manifest (host-side filesystem read via
+ *    `GET /dsh-insights/installed` — the same seam `dsh plugin add` operates
+ *    on, available on every build), lists them immediately, then
+ *    health-checks them against the corpus in one batch (grade badge + score
+ *    per row, S/A/B/C/D summary bar, npm version-drift hints, per-row
+ *    dsh-compat signal from compat.json, C/D rows link to on-site
+ *    alternatives). Health cards are cached per `name@version` (24h,
+ *    stale-while-revalidate): reopening the panel paints cached cards
+ *    instantly while unchanged versions re-verify in the background. When
+ *    the installed read fails, the page degrades to dist-tags + breaking
+ *    releases + advised actions.
  * 2. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
  *    jumps to Check with it loaded.
  * 3. 查验 Check      — paste `owner/repo` / a GitHub URL for the exact health
@@ -53,7 +57,7 @@ import {
   type SearchHit,
   type SimilarPick,
 } from './api.ts'
-import { getInventoryLister, installedPluginNames, npmNameOfModule } from './inventory.ts'
+import { getInstalled, installedNameSet, type InstalledPlugin } from './inventory.ts'
 import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
@@ -333,17 +337,65 @@ function CompatLine({ compat, dshVersion }: { compat: PluginCompat | null | unde
 
 // ── section: 体检 Audit ──────────────────────────────────────────────────────
 
-type AuditForm = 'loading' | 'full' | 'degraded' | 'error'
+type AuditForm = 'loading' | 'full' | 'degraded'
+
+/**
+ * One installed row. `card` is tri-state: undefined = audit pending (or the
+ * batch failed, see `auditFailed`), null = not in the corpus, card = ready.
+ */
+interface AuditRow {
+  name: string
+  version: string | null
+  plugin: boolean
+  card: PluginCard | null | undefined
+}
 
 interface AuditState {
   form: AuditForm
-  rows?: Array<{ name: string; card: PluginCard | null }>
-  /** Enabled official @deepseek-ai/* baseline modules (shown for context, not audited). */
+  rows?: AuditRow[]
+  /** In-box @deepseek-ai/* bundles in the profile (context, not audited). */
   baseline?: number
+  /** The profile the inventory was read from (drives uninstall commands). */
+  profile?: string
   dynamics?: DynamicsDoc
   /** Running dsh version from /dsh-insights/runtime (null when unknown). */
   dshVersion?: string | null
-  error?: unknown
+  /** The audit batch failed after the list rendered — pending rows stay. */
+  auditFailed?: boolean
+}
+
+// ── per-version health-card cache (24h TTL) ──────────────────────────────────
+//
+// The corpus refreshes daily, so a card is reused only while the installed
+// VERSION is unchanged and the entry is fresh: opening the panel paints
+// instantly, upgrading a plugin or waiting a day re-audits. localStorage is
+// opportunistic — private-mode/unavailable storage simply skips the cache.
+
+const AUDIT_CACHE_PREFIX = 'dsh-insights-kit:audit:v1:'
+const AUDIT_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+
+/** Cached card for `name@version`; undefined on miss/stale/unavailable storage. */
+function auditCacheRead(name: string, version: string | null): PluginCard | null | undefined {
+  if (!version) return undefined
+  try {
+    const raw = localStorage.getItem(AUDIT_CACHE_PREFIX + name)
+    if (!raw) return undefined
+    const entry = JSON.parse(raw) as { v?: unknown; at?: unknown; card?: PluginCard | null }
+    if (entry.v !== version || typeof entry.at !== 'number') return undefined
+    if (Date.now() - entry.at > AUDIT_CACHE_TTL_MS) return undefined
+    return entry.card ?? null
+  } catch {
+    return undefined
+  }
+}
+
+function auditCacheWrite(name: string, version: string | null, card: PluginCard | null): void {
+  if (!version) return
+  try {
+    localStorage.setItem(AUDIT_CACHE_PREFIX + name, JSON.stringify({ v: version, at: Date.now(), card }))
+  } catch {
+    // storage full/blocked — caching is best-effort
+  }
 }
 
 function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Element {
@@ -356,32 +408,51 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
       // dynamics feeds both forms (breaking card + dist-tags + latest
       // release); the runtime probe reports the running dsh version. Both
       // tolerate failure so the audit list still renders.
-      const [dynamics, dshVersion] = await Promise.all([
+      const [dynamics, dshVersion, inventory] = await Promise.all([
         fetchDynamics()
           .then((res) => res.dynamics)
           .catch(() => undefined),
         fetchRuntime()
           .then((res) => res.dsh?.version ?? null)
           .catch(() => null),
+        getInstalled(),
       ])
-      const lister = await getInventoryLister()
-      if (!lister) {
+      if (!inventory) {
         if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion })
         return
       }
+      // List first: render the manifest rows immediately (cached cards where
+      // the installed version is unchanged), then audit the rest in one batch.
+      const rows: AuditRow[] = inventory.plugins.map((plugin: InstalledPlugin) => ({
+        name: plugin.name,
+        version: plugin.version,
+        plugin: plugin.plugin,
+        card: auditCacheRead(plugin.name, plugin.version),
+      }))
+      if (cancelled) return
+      setAudit({
+        form: 'full',
+        rows,
+        baseline: inventory.baseline,
+        profile: inventory.profile,
+        dynamics,
+        dshVersion,
+      })
+      const pending = rows.filter((row) => row.card === undefined)
+      if (pending.length === 0) return
       try {
-        const entries = await lister()
-        const names = installedPluginNames(entries)
-        const baseline = entries.filter((e) => e.enabled && npmNameOfModule(e.moduleName).startsWith('@deepseek-ai/')).length
-        if (names.length === 0) {
-          if (!cancelled) setAudit({ form: 'full', rows: [], baseline, dynamics, dshVersion })
-          return
+        const res = await fetchAudit(pending.map((row) => row.name))
+        if (cancelled) return
+        for (const row of pending) {
+          const card = res.results[row.name] ?? null
+          row.card = card
+          auditCacheWrite(row.name, row.version, card)
         }
-        const res = await fetchAudit(names)
-        const rows = names.map((name) => ({ name, card: res.results[name] ?? null }))
-        if (!cancelled) setAudit({ form: 'full', rows, baseline, dynamics, dshVersion })
-      } catch (error) {
-        if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion, error })
+        setAudit((prev) => (prev.form === 'full' ? { ...prev, rows: [...rows] } : prev))
+      } catch {
+        if (!cancelled) {
+          setAudit((prev) => (prev.form === 'full' ? { ...prev, rows: [...rows], auditFailed: true } : prev))
+        }
       }
     })()
     return () => {
@@ -389,7 +460,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
     }
   }, [])
 
-  if (audit.form === 'loading') return <div style={mutedStyle}>{L('正在枚举已装插件并体检…', 'Enumerating installed plugins and auditing…')}</div>
+  if (audit.form === 'loading') return <div style={mutedStyle}>{L('正在读取已装插件清单…', 'Reading the installed-plugin list…')}</div>
 
   const releases = audit.dynamics?.dsh?.releases ?? []
   const distTags = audit.dynamics?.dsh?.npm?.distTags
@@ -401,12 +472,12 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
         <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
         <div style={cardStyle}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            {L('此 dsh 构建无法枚举已装插件', 'This dsh build cannot enumerate installed plugins')}
+            {L('无法读取已装插件清单', 'Cannot read the installed-plugin list')}
           </div>
           <div style={mutedStyle}>
             {L(
-              '当前构建未开放 pluginInventory Remote（或挂载失败），「体检」降级为版本与兼容性提醒。以下为 dsh 官方发布动态——升级前建议在「查验」页逐个检查已装插件的健康分与维护状态。',
-              'The running build does not expose the pluginInventory Remote (or the mount failed), so Audit falls back to version & compatibility reminders. Below are the official dsh release dynamics — before upgrading, check each installed plugin\'s health and maintenance state on the Check tab.',
+              '本机的 /dsh-insights/installed 接口不可用（host 侧插件未加载或异常），「体检」降级为版本与兼容性提醒。以下为 dsh 官方发布动态——升级前建议在「查验」页逐个检查已装插件的健康分与维护状态。',
+              'The local /dsh-insights/installed endpoint is unavailable (the host-side plugin is not loaded or errored), so Audit falls back to version & compatibility reminders. Below are the official dsh release dynamics — before upgrading, check each installed plugin\'s health and maintenance state on the Check tab.',
             )}
           </div>
         </div>
@@ -431,16 +502,15 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
     )
   }
 
-  if (audit.form === 'error') return <ErrorNote error={audit.error} />
-
   const rows = audit.rows ?? []
-  const listed = rows.filter((row) => row.card !== null)
+  const listed = rows.filter((row) => !!row.card)
   const counts: Record<string, number> = {}
   for (const row of listed) {
     const grade = (row.card?.grade ?? '?').toUpperCase()
     counts[grade] = (counts[grade] ?? 0) + 1
   }
-  const unlisted = rows.length - listed.length
+  const unlisted = rows.filter((row) => row.card === null).length
+  const profile = audit.profile ?? 'web'
 
   return (
     <div>
@@ -472,6 +542,17 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
         </div>
       )}
 
+      {audit.auditFailed && (
+        <div style={cardStyle}>
+          <div style={mutedStyle}>
+            {L(
+              '健康分拉取失败（上游数据暂不可达）——下方为本地已装清单，稍后可重开面板重试。',
+              'Health scores could not be fetched (upstream data unavailable) — the local installed list is shown below; reopen the panel later to retry.',
+            )}
+          </div>
+        </div>
+      )}
+
       <div style={cardStyle}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>
           {L('已装插件（{n}）', 'Installed plugins ({n})', { n: rows.length })}
@@ -484,14 +565,28 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
         <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
           {rows.map((row) => {
             const card = row.card
+            if (card === undefined) {
+              return (
+                <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
+                  <code style={{ fontWeight: 600 }}>{row.name}</code>
+                  {row.version && <span style={mutedStyle}>@{row.version}</span>}
+                  <span style={mutedStyle}>{audit.auditFailed ? L('未体检', 'not audited') : L('体检中…', 'auditing…')}</span>
+                </li>
+              )
+            }
             if (!card) {
               return (
                 <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
                   <GradeBadge grade={null} />
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
-                  <span style={mutedStyle}>{L('未收录（不在权威集）', 'unlisted (not in the corpus)')}</span>
+                  {row.version && <span style={mutedStyle}>@{row.version}</span>}
+                  <span style={mutedStyle}>
+                    {row.plugin
+                      ? L('未收录（不在权威集）', 'unlisted (not in the corpus)')
+                      : L('工具依赖（非插件，不参与体检）', 'utility dependency (not a plugin, not audited)')}
+                  </span>
                   <CopyCommandButton
-                    command={`dsh plugin --profile web remove ${row.name}`}
+                    command={`dsh plugin --profile ${profile} remove ${row.name}`}
                     label={L('复制卸载命令', 'Copy uninstall command')}
                   />
                 </li>
@@ -512,6 +607,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                     {card.full_name}
                   </button>
                   {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
+                  {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <Stars n={card.stars} />
                   {drift && (
                     <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
@@ -525,7 +621,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                     </a>
                   )}
                   <CopyCommandButton
-                    command={`dsh plugin --profile web remove ${row.name}`}
+                    command={`dsh plugin --profile ${profile} remove ${row.name}`}
                     label={L('复制卸载命令', 'Copy uninstall command')}
                   />
                 </div>
@@ -545,8 +641,9 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
       </div>
       <div style={{ ...mutedStyle, marginTop: 4 }}>
         {L(
-          '枚举来源：官方 pluginInventory Remote（Cordis Loader 实时状态）；健康分来自 dsh-insights.com 权威集（客观启发式信号，非安全审计）。',
-          'Enumeration source: the official pluginInventory Remote (live Cordis Loader state); health scores from the dsh-insights.com corpus (objective heuristic signals, not a security audit).',
+          '枚举来源：本机 dsh profile 清单（~/.dsh/profiles/{profile}，与 dsh plugin 安装器同源）；健康分来自 dsh-insights.com 权威集（客观启发式信号，非安全审计）；版本未变的插件 24h 内复用上次的体检结果。',
+          'Enumeration source: the local dsh profile manifest (~/.dsh/profiles/{profile}, the same seam `dsh plugin` operates on); health scores from the dsh-insights.com corpus (objective heuristic signals, not a security audit); plugins whose version is unchanged reuse their last audit for 24h.',
+          { profile },
         )}
       </div>
     </div>
@@ -797,22 +894,16 @@ function HealthCard(props: {
   const dims = Object.entries(card.dimScores)
   const drift = card.npmLatest && card.version && card.npmLatest !== card.version
 
-  // Installed-plugin names (npm) via the inventory Remote, for the
-  // install/uninstall action. Unavailable/failed enumeration → treat as
-  // not-installed (the plain install command is shown), never an error.
+  // Installed-plugin names (npm) from the local profile manifest (via the
+  // host /dsh-insights/installed route), for the install/uninstall action.
+  // Unavailable/failed enumeration → treat as not-installed (the plain
+  // install command is shown), never an error.
   const [installedNames, setInstalledNames] = useState<ReadonlySet<string> | null>(null)
   useEffect(() => {
     let cancelled = false
-    void (async () => {
-      try {
-        const lister = await getInventoryLister()
-        if (!lister) return
-        const entries = await lister()
-        if (!cancelled) setInstalledNames(new Set(installedPluginNames(entries)))
-      } catch {
-        // silent degradation, see above
-      }
-    })()
+    void installedNameSet().then((names) => {
+      if (!cancelled) setInstalledNames(names)
+    })
     return () => {
       cancelled = true
     }
@@ -965,18 +1056,15 @@ function ScenariosSection(props: {
   const { doc, state, error, onPick } = props
   const [installed, setInstalled] = useState<ReadonlySet<string>>(EMPTY_SET)
 
-  // Resolve the set of installed corpus plugins once on mount (same chain as
-  // the Audit section: inventory Remote → npm names → batch audit). When the
-  // inventory gateway is unavailable or the audit fails, rows simply render
+  // Resolve the set of installed corpus plugins once on mount: installed npm
+  // names (local profile manifest via /dsh-insights/installed) → batch audit
+  // → full_names. When the read or the audit fails, rows simply render
   // without the「已安装」marker — never an error here.
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const lister = await getInventoryLister()
-        if (!lister) return
-        const entries = await lister()
-        const names = installedPluginNames(entries)
+        const names = [...await installedNameSet()]
         if (names.length === 0) return
         const res = await fetchAudit(names)
         if (cancelled) return

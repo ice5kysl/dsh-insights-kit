@@ -9,7 +9,7 @@
 
 这个插件把答案**搬进 dsh Web**：侧栏底部常驻一个 ✦ 按钮，点击打开「生态」面板（覆盖在应用之上的右侧抽屉），内含三个能力页签：
 
-- **体检**——通过官方 `pluginInventory` Remote（Cordis Loader 实时状态）**枚举你已安装的插件**并批量体检：每个插件显示等级徽章 + 分数，顶部 S/A/B/C/D 汇总条，**npm 版本漂移提醒**（npm latest ≠ 仓库版本），**每行 dsh 兼容信号**（compat.json 的 `engines.dsh` 或 cordis peer range，可判定时对照当前 dsh 版本给出保守的 ✓/⚠ 结论），低分（C/D）行附「同类更优替代 ↗」链接——另有**当前 vs 最新 dsh 版本行**（落后时提示升级）与 **BREAKING 变更预警卡**，提示官方 dsh release 可能需要插件适配。若当前构建未开放枚举网关，则优雅降级为**版本与兼容性提醒**页（dist-tags、标红 BREAKING 的最近 releases、建议动作）。
+- **体检**——直接读取当前 profile 的清单（host 侧读 `~/.dsh/profiles/<profile>/package.json`，与 `dsh plugin add` 同一个数据源，任何构建都可用）**枚举你已安装的插件**并批量体检：每个插件显示等级徽章 + 分数，顶部 S/A/B/C/D 汇总条，**npm 版本漂移提醒**（npm latest ≠ 仓库版本），**每行 dsh 兼容信号**（compat.json 的 `engines.dsh` 或 cordis peer range，可判定时对照当前 dsh 版本给出保守的 ✓/⚠ 结论），低分（C/D）行附「同类更优替代 ↗」链接——另有**当前 vs 最新 dsh 版本行**（落后时提示升级）与 **BREAKING 变更预警卡**，提示官方 dsh release 可能需要插件适配。清单即时渲染（含已装版本号）；健康卡按 `包名@版本` **缓存 24 小时**，版本未变的插件不重复体检。若本地读取失败，则优雅降级为**版本与兼容性提醒**页（dist-tags、标红 BREAKING 的最近 releases、建议动作）。
 - **查验**——输入 `owner/repo` **或直接粘贴 GitHub URL**；得到健康卡：大等级徽章（S 紫 / A 绿 / B 蓝 / C 橙 / D 红）、0–100 分数、四维子分条（工程/文档/可发现/维护）、带严重级别的扣分明细、**安装/卸载操作区**（一键复制 `dsh plugin --profile web add/remove` 命令，已在 inventory 里的插件显示「已安装」并换成卸载命令；未发布 npm 的插件提示从源码安装并附 GitHub 链接）、**相似推荐**（同类目按分数取前 5），以及「在 dsh-insights.com 查看完整页 ↗」链接。**输入不含 `/` 的关键词则直接搜索权威集**（防抖子串匹配，按 stars 排序；点结果行即加载健康卡）。未收录的仓库会明确提示**「不在权威集」**，并附按仓库名自动搜出的**相似插件**列表，而不是编造分数。
 - **场景**——按使用场景浏览推荐插件（名称/等级/一句话理由，已装的插件带**「已安装」标记**）；点任意插件直接跳到「查验」并加载它的健康卡。
 - **一键复制安装/卸载命令**——面板保持只读：不替你做装/卸，场景与体检行尾提供**复制小按钮**（`dsh plugin --profile web add/remove <pkg>`）把命令放进剪贴板；在终端执行后重启 `dsh web` 生效。
@@ -39,6 +39,7 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 | `/dsh-insights/scenarios` | `scenarios.json`，并按 `full_name` 从权威集为每个推荐注解 npm `pkgName`（查不到则省略），供复制安装/卸载命令使用 |
 | `/dsh-insights/dynamics` | `dynamics.json` 透传 |
 | `/dsh-insights/runtime` | 当前运行的 dsh 版本（host 端从 `@deepseek-ai/dsh-web-app` / `dsh-base` 的 package.json 解析；解析不到为 `null`） |
+| `/dsh-insights/installed` | 当前 profile 的已装插件清单，直读 profile manifest（`~/.dsh/profiles/<profile>`；可用 `DSH_INSIGHTS_PROFILE_DIR` / `DSH_INSIGHTS_PROFILE` 覆盖）：`{profile, baseline, plugins: [{name, spec, version, plugin}]}`——官方 in-box `@deepseek-ai/*` 基线计入 `baseline` 不列出；纯本地文件读取，不拉上游 |
 | `/dsh-insights/health` | 探活 + 各文档缓存年龄 |
 
 - **上游**：`https://dsh-insights.com/data/{insights,scenarios,dynamics,compat,enrich}.json`——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。
