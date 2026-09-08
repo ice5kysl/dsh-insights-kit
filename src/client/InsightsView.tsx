@@ -235,6 +235,8 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
   const [canMutate, setCanMutate] = useState<boolean | null>(null)
   const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle')
   const [message, setMessage] = useState<string>('')
+  /** True when the change went live in the running composition (no restart). */
+  const [wentHot, setWentHot] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -265,12 +267,19 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
   const run = async (): Promise<void> => {
     setState('busy')
     setMessage('')
+    setWentHot(false)
     try {
       const result = installed ? await uninstallPlugin(pkgName) : await installPlugin(pkgName)
       invalidateInstalled()
+      setWentHot(result.hot === true)
       if (result.note === 'already-installed') {
         setState('done')
         setMessage(L('已安装，无需重复操作', 'Already installed'))
+      } else if (result.hot === true) {
+        setState('done')
+        setMessage(installed
+          ? L('已卸载并即时停用 ✓ 刷新页面移除界面', 'Uninstalled & deactivated ✓ refresh the page to remove its UI')
+          : L('已安装并即时激活 ✓ 刷新页面即可使用', 'Installed & activated ✓ refresh the page to use it'))
       } else if (result.restartRequired) {
         setState('done')
         setMessage(installed
@@ -291,7 +300,7 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
       <button
         style={copyButtonStyle}
         disabled={state === 'busy'}
-        title={L('直接在本机 profile 执行（pnpm），重启 dsh web 后生效', 'Runs against the local profile (pnpm); restart `dsh web` to take effect')}
+        title={L('直接在本机 profile 执行（pnpm + 装载清单）；支持热挂载的宿主即刻生效，否则重启 dsh web 生效', 'Runs against the local profile (pnpm + the load list); hot-mount capable hosts activate immediately, otherwise restart `dsh web`')}
         onClick={(event) => {
           event.stopPropagation()
           void run()
@@ -302,6 +311,17 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
           : (installed ? L('卸载', 'Uninstall') : L('安装', 'Install'))}
       </button>
       {state === 'done' && message && <span style={{ ...mutedStyle, color: '#16a34a' }}>{message}</span>}
+      {state === 'done' && wentHot && (
+        <button
+          style={copyButtonStyle}
+          onClick={(event) => {
+            event.stopPropagation()
+            window.location.reload()
+          }}
+        >
+          {L('立即刷新', 'Refresh now')}
+        </button>
+      )}
       {state === 'error' && (
         <span style={{ ...mutedStyle, color: '#dc2626' }} title={message}>
           {L('操作失败', 'Failed')}{message ? `：${message.slice(0, 120)}` : ''}

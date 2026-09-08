@@ -225,6 +225,8 @@ export interface OpResult {
   /** 'already-installed' noop marker on install. */
   note?: string
   detail?: string
+  /** True when the change went live in the running composition (hot mount/disable) — no restart, just a page refresh. */
+  hot?: boolean
   restartRequired?: boolean
 }
 

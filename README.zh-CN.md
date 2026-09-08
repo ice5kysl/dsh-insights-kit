@@ -10,9 +10,9 @@
 这个插件把答案**搬进 dsh Web**：侧栏底部常驻一个 ✦ 按钮，点击打开「生态」面板（覆盖在应用之上的右侧抽屉），内含三个能力页签：
 
 - **体检**——直接读取当前 profile 的清单（host 侧读 `~/.dsh/profiles/<profile>/package.json`，与 `dsh plugin add` 同一个数据源，任何构建都可用）**枚举你已安装的插件**并批量体检：每个插件显示等级徽章 + 分数，顶部 S/A/B/C/D 汇总条，**npm 版本漂移提醒**（npm latest ≠ 仓库版本），**每行 dsh 兼容信号**（compat.json 的 `engines.dsh` 或 cordis peer range，可判定时对照当前 dsh 版本给出保守的 ✓/⚠ 结论），低分（C/D）行附「同类更优替代 ↗」链接——另有**当前 vs 最新 dsh 版本行**（落后时提示升级）与 **BREAKING 变更预警卡**，提示官方 dsh release 可能需要插件适配。清单即时渲染（含已装版本号）；健康卡按 `包名@版本` **缓存 24 小时**，版本未变的插件不重复体检。若本地读取失败，则优雅降级为**版本与兼容性提醒**页（dist-tags、标红 BREAKING 的最近 releases、建议动作）。
-- **查验**——输入 `owner/repo` **或直接粘贴 GitHub URL**；得到健康卡：大等级徽章（S 紫 / A 绿 / B 蓝 / C 橙 / D 红）、0–100 分数、四维子分条（工程/文档/可发现/维护）、带严重级别的扣分明细、**安装/卸载操作区**（**一键按钮**：直接对本机 profile 执行 `pnpm add/remove` + 编辑装载清单，重启 `dsh web` 生效；已在 inventory 里的插件显示「已安装」并换成卸载；旧版 host 或无 pnpm 的机器上退化为一键复制 `dsh plugin` 命令；未发布 npm 的插件提示从源码安装并附 GitHub 链接）、**相似推荐**（同类目按分数取前 5），以及「在 dsh-insights.com 查看完整页 ↗」链接。**输入不含 `/` 的关键词则直接搜索权威集**（防抖子串匹配，按 stars 排序；点结果行即加载健康卡）。未收录的仓库会明确提示**「不在权威集」**，并附按仓库名自动搜出的**相似插件**列表，而不是编造分数。
+- **查验**——输入 `owner/repo` **或直接粘贴 GitHub URL**；得到健康卡：大等级徽章（S 紫 / A 绿 / B 蓝 / C 橙 / D 红）、0–100 分数、四维子分条（工程/文档/可发现/维护）、带严重级别的扣分明细、**安装/卸载操作区**（**一键按钮**：直接对本机 profile 执行 `pnpm add/remove` + 编辑装载清单——**支持热挂载的宿主即时生效（刷新页面即可）**，其余宿主下次 `dsh web` 重启生效；已在 inventory 里的插件显示「已安装」并换成卸载；旧版 host 或无 pnpm 的机器上退化为一键复制 `dsh plugin` 命令；未发布 npm 的插件提示从源码安装并附 GitHub 链接）、**相似推荐**（同类目按分数取前 5），以及「在 dsh-insights.com 查看完整页 ↗」链接。**输入不含 `/` 的关键词则直接搜索权威集**（防抖子串匹配，按 stars 排序；点结果行即加载健康卡）。未收录的仓库会明确提示**「不在权威集」**，并附按仓库名自动搜出的**相似插件**列表，而不是编造分数。
 - **场景**——按使用场景浏览推荐插件（名称/等级/一句话理由，已装的插件带**「已安装」标记**）；点任意插件直接跳到「查验」并加载它的健康卡。
-- **一键安装/卸载**——场景与体检行尾提供**安装/卸载按钮**，直接操作本机 profile（pnpm + `dsh.profile.bundles` 装载清单，重启 `dsh web` 生效）。多重防护：仅 POST + host-trust 门禁、必须携带自定义头、严格 npm 包名校验、安装仅限权威集收录的插件包、pnpm 走参数数组（无 shell 拼接）、`DSH_INSIGHTS_NO_MUTATE=1` 可整体关闭。旧版 host 或无 pnpm 时按钮退化为**复制命令**。
+- **一键安装/卸载**——场景与体检行尾提供**安装/卸载按钮**，直接操作本机 profile（pnpm + `dsh.profile.bundles` 装载清单）。**支持热挂载的宿主上免重启**：新装的插件通过 vendored include 子树即时挂载进运行中的组合树（dsh-market 同款方案），卸载则即时停用对应的 Loader 条目——刷新页面即可生效；不支持热挂载的宿主上，清单状态也已持久化，下次 `dsh web` 重启自动生效。多重防护：仅 POST + host-trust 门禁、必须携带自定义头、严格 npm 包名校验、安装仅限权威集收录的插件包、pnpm 走参数数组（无 shell 拼接）、`DSH_INSIGHTS_NO_MUTATE=1` 可整体关闭。旧版 host 或无 pnpm 时按钮退化为**复制命令**。
 - **中英双语 UI**：按浏览器语言自动判断（zh → 中文，其余 → 英文）；面板顶栏「中 / EN」按钮随时切换并记住偏好。
 
 ### 作者自检（CLI）
@@ -40,9 +40,9 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 | `/dsh-insights/dynamics` | `dynamics.json` 透传 |
 | `/dsh-insights/runtime` | 当前运行的 dsh 版本（host 端从 `@deepseek-ai/dsh-web-app` / `dsh-base` 的 package.json 解析；解析不到为 `null`） |
 | `/dsh-insights/installed` | 当前 profile 的已装插件清单，直读 profile manifest（`~/.dsh/profiles/<profile>`；可用 `DSH_INSIGHTS_PROFILE_DIR` / `DSH_INSIGHTS_PROFILE` 覆盖）：`{profile, baseline, plugins: [{name, spec, version, plugin, enabled}]}`——官方 in-box `@deepseek-ai/*` 基线计入 `baseline` 不列出；纯本地文件读取，不拉上游 |
-| `POST /dsh-insights/install` | 一键安装到当前 profile（`pnpm add` + 追加 `dsh.profile.bundles`）；body `{name}`；仅限权威集收录的插件包；需携带 `x-dsh-insights-kit: mutate` 头；成功返回 `restartRequired: true` |
-| `POST /dsh-insights/uninstall` | 从装载清单移除 + `pnpm remove`；body `{name}`；仅限已安装的包；同样要求自定义头 |
-| `/dsh-insights/health` | 探活 + 各文档缓存年龄 + `mutations` 能力标记（`DSH_INSIGHTS_NO_MUTATE=1` 关闭开关与 pnpm 探测） |
+| `POST /dsh-insights/install` | 一键安装到当前 profile（`pnpm add` + 追加 `dsh.profile.bundles`，宿主支持时即时热挂载进运行中的组合树）；body `{name}`；仅限权威集收录的插件包；需携带 `x-dsh-insights-kit: mutate` 头；返回带 `hot`（已即时生效）/ `restartRequired` |
+| `POST /dsh-insights/uninstall` | 即时停用 Loader 条目（或销毁热挂载）+ 移出装载清单 + `pnpm remove`；body `{name}`；仅限已安装的包；同样要求自定义头 |
+| `/dsh-insights/health` | 探活 + 各文档缓存年龄 + 能力标记：`mutations`（`DSH_INSIGHTS_NO_MUTATE=1` 开关 + pnpm 探测）与 `hotMount`（vendored include 插件可导入） |
 
 - **上游**：`https://dsh-insights.com/data/{insights,scenarios,dynamics,compat,enrich}.json`——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。
 - **只读**，无写端点；每个请求都过一道与官方 `/api` 一致的主机信任门（回环 Host 直接信任，其余需要同源 Origin 标记）。**这不是认证层**——与官方 web server 同一姿态（默认绑定 127.0.0.1）。

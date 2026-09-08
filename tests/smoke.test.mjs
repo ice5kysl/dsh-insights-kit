@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
+import { disableEntry, parseSimplePatch } from '../src/host/hot.ts'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
 import { classifyCheckInput } from '../src/client/api.ts'
@@ -88,6 +89,14 @@ const INSIGHTS = {
       stars: 1,
       pkgName: 'fail-pkg',
       description: 'Install always fails in the smoke fixtures',
+    },
+    {
+      // Corpus-known package with a materialized node_modules entry + plain
+      // cordis.patch.yml in the mutate profile — exercises the hot-mount path.
+      full_name: 'zzz/dsh-hot-ok',
+      stars: 1,
+      pkgName: 'dsh-hot-ok',
+      description: 'Hot-mountable fixture plugin',
     },
   ],
 }
@@ -322,6 +331,15 @@ writeTree(mutateFixture, {
     dependencies: { '@deepseek-ai/dsh-base': '0.1.2-rc.1' },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
   }, null, 2),
+  // Pre-materialized package tree for the hot-mountable fixture plugin: the
+  // stub pnpm only edits the manifest, so the patch + pkg.json the hot mount
+  // reads must already exist.
+  'node_modules/dsh-hot-ok/package.json': JSON.stringify({ name: 'dsh-hot-ok', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+  'node_modules/dsh-hot-ok/cordis.patch.yml': '- insert:\n    - id: hot-ok\n      name: dsh-hot-ok\n',
+})
+// A leftover hot-mount input from a "previous process" — apply() must wipe it.
+writeTree(profileFixture, {
+  '.dsh-insights/hot-99.yml': "- id: 'dshi-stale'\n  name: 'dsh-stale'\n",
 })
 writeTree(fixtureRoot, {
   'pnpm-stub.sh': '#!/usr/bin/env bash\nexec node "$(dirname "$0")/pnpm-stub.mjs" "$@"\n',
@@ -347,6 +365,19 @@ writeTree(fixtureRoot, {
 chmodSync(join(fixtureRoot, 'pnpm-stub.sh'), 0o755)
 process.env.DSH_INSIGHTS_PNPM = join(fixtureRoot, 'pnpm-stub.sh')
 
+// Stub for the harness-vendored include plugin (hot-mount carrier). write()
+// is a tripwire — the kit's subclass must suppress it.
+writeTree(fixtureRoot, {
+  'include-stub.mjs': [
+    'export class Include {',
+    '  constructor(ctx, config) { this.ctx = ctx; this.config = config }',
+    '  write() { throw new Error("write() must be suppressed by the hot subclass") }',
+    '  import(name) { return { name, apply() {} } }',
+    '}',
+  ].join('\n'),
+})
+process.env.DSH_INSIGHTS_INCLUDE_MODULE = join(fixtureRoot, 'include-stub.mjs')
+
 // Identical to good-plugin but without engines.dsh — isolates the zero-weight
 // hint: the score must stay 100/S and the CLI exit code 0.
 const { engines: _omitEngines, ...GOOD_NO_ENGINES } = GOOD_PKG
@@ -369,12 +400,35 @@ writeTree(hintDir, {
 
 const registered = []
 const effects = []
+// Hot-mount fakes: `inject` hands over a fake loader (one bundle-layer entry
+// named dsh-beta), `plugin` records subtree mounts with a disposable handle.
+const pluginMounts = []
+const loaderEntry = {
+  options: { name: 'dsh-beta', disabled: null },
+  fiber: { live: true },
+  updates: [],
+  async update(opts) { this.updates.push(opts) },
+}
+const fakeLoader = { entries: () => [loaderEntry] }
 const fakeCtx = {
   logger: () => ({ info: () => {} }),
   effect: (fn) => {
     const dispose = fn()
     effects.push(dispose)
     return dispose
+  },
+  inject(names, cb) {
+    if (names.includes('loader')) cb({ loader: fakeLoader })
+  },
+  plugin(tree, config) {
+    const handle = {
+      config,
+      disposed: false,
+      await: async () => {},
+      dispose: async () => { handle.disposed = true },
+    }
+    pluginMounts.push(handle)
+    return handle
   },
   webServer: {
     register(route) {
@@ -391,6 +445,10 @@ apply(fakeCtx)
 const route = registered[0]
 if (!route || route.kind !== 'prefix' || route.path !== '/dsh-insights') {
   throw new Error('route not registered as expected')
+}
+// apply() must have wiped the leftover hot-mount input from the profile dir
+if (existsSync(join(profileFixture, '.dsh-insights', 'hot-99.yml'))) {
+  throw new Error('stale hot-mount file survived boot cleanup')
 }
 
 const server = createServer((req, res) => {
@@ -732,6 +790,84 @@ await check('mutation: kill switch DSH_INSIGHTS_NO_MUTATE -> 403', async () => {
 await check('health reports mutations: true (stub pnpm probed)', async () => {
   const { body } = await getJson('/health')
   if (body.mutations !== true) throw new Error(`mutations flag wrong: ${JSON.stringify(body.mutations)}`)
+  // The stub include module is set, so the hot-mount probe must report true.
+  if (body.hotMount !== true) throw new Error(`hotMount flag wrong: ${JSON.stringify(body.hotMount)}`)
+})
+
+// ── hot mount / live disable ─────────────────────────────────────────────────
+
+await check('hot: parseSimplePatch accepts plain inserts, rejects anything else', async () => {
+  const plain = parseSimplePatch('# comment\r\n- insert:\r\n    - id: foo\r\n      name: bar\r\n')
+  if (!plain || plain.length !== 1 || plain[0].id !== 'foo' || plain[0].name !== 'bar') {
+    throw new Error(`plain patch wrong: ${JSON.stringify(plain)}`)
+  }
+  for (const bad of [
+    '- insert:\n    - id: foo\n      name: bar\n      config:\n        k: 1\n',
+    '- insert:\n    - id: foo\n      name: !!js/new Date\n',
+    '[]\n',
+    '- insert:\n    - id: foo\n',
+  ]) {
+    if (parseSimplePatch(bad) !== null) throw new Error(`must reject: ${JSON.stringify(bad)}`)
+  }
+})
+
+await check('hot: disableEntry toggles only the matching loader entry, null-safe', async () => {
+  const entries = [
+    { options: { name: 'x' }, fiber: {}, updates: [], async update(o) { this.updates.push(o) } },
+    { options: { name: 'y' }, fiber: {}, updates: [], async update(o) { this.updates.push(o) } },
+  ]
+  const loader = { entries: () => entries }
+  if (await disableEntry(loader, 'x') !== true) throw new Error('x should be disabled')
+  if (entries[0].updates.length !== 1 || entries[0].updates[0].disabled !== true) throw new Error('x update wrong')
+  if (entries[1].updates.length !== 0) throw new Error('y must be untouched')
+  if (await disableEntry(loader, 'zzz') !== false) throw new Error('unknown name must return false')
+  if (await disableEntry(null, 'x') !== false) throw new Error('null loader must return false')
+})
+
+await check('mutation: install hot-mounts (hot:true, no restart), uninstall disposes live', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    const add = await postJson('/install', { name: 'dsh-hot-ok' }, MUTATE_HEADERS)
+    if (add.status !== 200 || add.body.ok !== true) throw new Error(`install: ${add.status} ${JSON.stringify(add.body)}`)
+    if (add.body.hot !== true || add.body.restartRequired !== false) {
+      throw new Error(`hot flags wrong: ${JSON.stringify(add.body)}`)
+    }
+    // The Include subtree got the mount: one handle, its input file carrying
+    // the dshi- prefixed row under the profile's .dsh-insights dir.
+    const handle = pluginMounts[pluginMounts.length - 1]
+    if (!handle?.config?.path?.includes('.dsh-insights')) throw new Error(`mount path wrong: ${JSON.stringify(handle?.config)}`)
+    const hotFile = decodeURIComponent(handle.config.path.replace('file://', ''))
+    const yml = readFileSync(hotFile, 'utf8')
+    if (!yml.includes("id: 'dshi-hot-ok'") || !yml.includes("name: 'dsh-hot-ok'")) {
+      throw new Error(`hot file wrong: ${yml}`)
+    }
+    const remove = await postJson('/uninstall', { name: 'dsh-hot-ok' }, MUTATE_HEADERS)
+    if (remove.status !== 200 || remove.body.hot !== true) throw new Error(`uninstall: ${JSON.stringify(remove.body)}`)
+    if (handle.disposed !== true) throw new Error('hot handle not disposed')
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('mutation: uninstall of a bundle-layer plugin live-disables its loader entry', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    // dsh-beta sits in the fake loader as a bundle-layer entry. It has no
+    // node_modules tree in this fixture, so the install above could not
+    // hot-mount it (no patch to read) — meaning the uninstall's hotUnmount
+    // finds no kit-owned handle and disableEntry must flip the loader entry.
+    await postJson('/install', { name: 'dsh-beta' }, MUTATE_HEADERS) // deps row for the not-installed gate
+    loaderEntry.updates.length = 0
+    const remove = await postJson('/uninstall', { name: 'dsh-beta' }, MUTATE_HEADERS)
+    if (remove.status !== 200) throw new Error(`uninstall: ${JSON.stringify(remove.body)}`)
+    if (loaderEntry.updates.length !== 1 || loaderEntry.updates[0].disabled !== true) {
+      throw new Error(`loader entry not disabled: ${JSON.stringify(loaderEntry.updates)}`)
+    }
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
 })
 
 await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {

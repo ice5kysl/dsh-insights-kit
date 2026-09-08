@@ -60,6 +60,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { cleanHotDir, disableEntry, hotMount, hotMountAvailable, hotUnmount, type HotContext, type LoaderLike } from './hot.ts'
 import { readInstalledInventory, resolveProfileDir } from './installed.ts'
 import { installPackage, isMutablePackage, pnpmAvailable, uninstallPackage, type OpKind } from './ops.ts'
 import {
@@ -94,6 +95,10 @@ interface HostCtxLike {
   logger(name: string): { info(...parts: unknown[]): void }
   effect(fn: () => unknown): unknown
   webServer: WebServerLike
+  /** Park a callback on optional services (the `loader` hot-mount carrier). */
+  inject(names: string[], cb: (ctx: { loader?: LoaderLike } & Record<string, unknown>) => void): unknown
+  /** Mount a plugin subtree (cordis Context.plugin) — used by hot mounts. */
+  plugin(plugin: unknown, config: unknown): { await(): Promise<unknown>; dispose(): Promise<unknown> | void }
 }
 
 const PREFIX = '/dsh-insights'
@@ -164,12 +169,26 @@ export function apply(raw: unknown): void {
     baseUrl: process.env.DSH_INSIGHTS_UPSTREAM_BASE || undefined,
   })
 
+  // Hot-mount carriers: leftover input files from a previous process are
+  // wiped (the bundle layer owns durable state), and the loader service is
+  // grabbed through a child fiber — never a hard dependency, so builds
+  // without it simply fall back to restart-required mutation results.
+  try {
+    cleanHotDir(resolveProfileDir().dir)
+  } catch { /* profile dir unresolvable — hot mounts degrade to restart */ }
+  let loaderRef: LoaderLike | null = null
+  try {
+    ctx.inject(['loader'], (child) => {
+      loaderRef = child.loader ?? null
+    })
+  } catch { /* no inject on this ctx shape — hot paths degrade */ }
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: PREFIX,
-    handler: (req, res) => void handleRequest(req, res, store, log),
+    handler: (req, res) => void handleRequest(req, res, store, log, () => loaderRef, ctx),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,health} (read-only)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,health} + POST install/uninstall (hot-mount capable)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -179,6 +198,8 @@ async function handleRequest(
   res: ServerResponse,
   store: InsightsStore,
   log: { info(...parts: unknown[]): void },
+  getLoader: () => LoaderLike | null,
+  hotCtx: HotContext,
 ): Promise<void> {
   if (!trusted(req)) {
     sendJson(res, 403, { ok: false, error: wireError('forbidden', 'untrusted host/origin') })
@@ -200,7 +221,7 @@ async function handleRequest(
   }
   try {
     if (mutationOp !== null) {
-      await handleMutation(req, res, store, mutationOp)
+      await handleMutation(req, res, store, mutationOp, getLoader, hotCtx)
       return
     }
     if (pathname === `${PREFIX}/plugin`) {
@@ -327,6 +348,10 @@ async function handleRequest(
         // this is true (kill switch off AND pnpm runnable); older builds lack
         // the routes entirely and the client falls back to copy-commands.
         mutations: !mutationsDisabled() && await pnpmAvailable(),
+        // Whether this host build can activate mutations without a restart
+        // (the vendored include plugin importable). False → install/uninstall
+        // still work, they just need a `dsh web` restart.
+        hotMount: await hotMountAvailable(),
       })
       return
     }
@@ -415,6 +440,8 @@ async function handleMutation(
   res: ServerResponse,
   store: InsightsStore,
   op: OpKind,
+  getLoader: () => LoaderLike | null,
+  hotCtx: HotContext,
 ): Promise<void> {
   if (mutationsDisabled()) {
     sendJson(res, 403, { ok: false, error: wireError('mutations-disabled', 'mutations disabled (DSH_INSIGHTS_NO_MUTATE)') })
@@ -452,7 +479,23 @@ async function handleMutation(
       return
     }
     const result = await installPackage(dir, name)
-    sendJson(res, result.ok ? 200 : 500, { ok: result.ok, name, op, status: result.status, detail: result.detail, restartRequired: result.ok })
+    if (!result.ok) {
+      sendJson(res, 500, { ok: result.ok, name, op, status: result.status, detail: result.detail, restartRequired: false })
+      return
+    }
+    // Restart-free activation: mount the fresh package into the running
+    // composition (dsh-market's Include-subtree recipe). Failure degrades to
+    // restart-required — the durable manifest state already converges.
+    const hot = await hotMount(hotCtx, dir, name)
+    sendJson(res, 200, {
+      ok: true,
+      name,
+      op,
+      status: 'done',
+      hot: hot.ok,
+      detail: hot.reason ?? undefined,
+      restartRequired: !hot.ok,
+    })
     return
   }
 
@@ -460,9 +503,21 @@ async function handleMutation(
     sendJson(res, 404, { ok: false, error: wireError('not-installed', `${name} is not installed in profile ${profile}`) })
     return
   }
+  // Stop the live plugin first (hot mount dispose, else the bundle-layer
+  // in-memory disable), then the file-level removal. A pnpm failure after
+  // this leaves the package disabled-but-on-disk — consistent and reported.
+  const liveOff = await hotUnmount(name) || await disableEntry(getLoader(), name)
   const result = await uninstallPackage(dir, name)
   const code = result.ok ? 200 : result.status === 'partial' ? 200 : 500
-  sendJson(res, code, { ok: result.ok, name, op, status: result.status, detail: result.detail, restartRequired: result.status !== 'failed' })
+  sendJson(res, code, {
+    ok: result.ok,
+    name,
+    op,
+    status: result.status,
+    hot: liveOff,
+    detail: result.detail,
+    restartRequired: result.status === 'failed' ? false : !liveOff,
+  })
 }
 
 // ── host-trust gate (mirrors the official /api fence posture) ───────────────
