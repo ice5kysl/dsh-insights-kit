@@ -213,6 +213,63 @@ export async function fetchInstalled(): Promise<{
   return getJson('installed')
 }
 
+/** Liveness + capabilities (mutations = one-click install/uninstall usable). */
+export async function fetchHealth(): Promise<{ mutations?: boolean }> {
+  return getJson('health')
+}
+
+/** Result of a one-click install/uninstall against the local profile. */
+export interface OpResult {
+  ok: boolean
+  status?: 'done' | 'partial' | 'failed'
+  /** 'already-installed' noop marker on install. */
+  note?: string
+  detail?: string
+  restartRequired?: boolean
+}
+
+/** POST one profile mutation with the anti-CSRF custom header. */
+async function postOp(path: 'install' | 'uninstall', name: string): Promise<OpResult> {
+  let response: Response
+  try {
+    response = await fetch(`/dsh-insights/${path}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-dsh-insights-kit': 'mutate',
+      },
+      body: JSON.stringify({ name }),
+    })
+  } catch {
+    throw new ApiError({
+      code: 'network',
+      message: L('无法连接本机 dsh web 服务（/dsh-insights 不可达）', 'Cannot reach the local dsh web service (/dsh-insights)'),
+    })
+  }
+  let body: ({ ok?: boolean; error?: WireError } & Record<string, unknown>) | null = null
+  try {
+    body = await response.json()
+  } catch {
+    // non-JSON body — treat as endpoint missing
+  }
+  if (!response.ok || body === null || body.ok !== true) {
+    const error = body?.error ?? { code: 'http', message: `HTTP ${response.status}` }
+    throw new ApiError(error)
+  }
+  return body as unknown as OpResult
+}
+
+/** One-click install of a corpus plugin package into the active profile. */
+export function installPlugin(name: string): Promise<OpResult> {
+  return postOp('install', name)
+}
+
+/** One-click uninstall of an installed package from the active profile. */
+export function uninstallPlugin(name: string): Promise<OpResult> {
+  return postOp('uninstall', name)
+}
+
 /** Batch health lookup by npm package names; unlisted names map to null. */
 export async function fetchAudit(
   names: readonly string[],

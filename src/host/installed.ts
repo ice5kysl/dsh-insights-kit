@@ -108,6 +108,24 @@ function activeProfile(env: NodeJS.ProcessEnv, argv: readonly string[]): string 
   return 'web'
 }
 
+/**
+ * The active profile's directory: `DSH_INSIGHTS_PROFILE_DIR` (tests, or
+ * hosts like DSH Desktop that own the profile location) → the DSH_HOME-derived
+ * path. Shared by the inventory read and the install/uninstall mutations so
+ * both always operate on the SAME profile.
+ */
+export function resolveProfileDir(
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): { profile: string; dir: string } {
+  const profile = activeProfile(env, argv)
+  const explicitDir = env.DSH_INSIGHTS_PROFILE_DIR
+  const dir = explicitDir !== undefined && explicitDir.trim().length > 0
+    ? resolve(expandHomePath(explicitDir))
+    : join(resolveDshHome(undefined, env), 'profiles', profile)
+  return { profile, dir }
+}
+
 function readJson(path: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
@@ -132,11 +150,7 @@ export function readInstalledInventory(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv,
 ): InstalledInventory {
-  const profile = activeProfile(env, argv)
-  const explicitDir = env.DSH_INSIGHTS_PROFILE_DIR
-  const dir = explicitDir !== undefined && explicitDir.trim().length > 0
-    ? resolve(expandHomePath(explicitDir))
-    : join(resolveDshHome(undefined, env), 'profiles', profile)
+  const { profile, dir } = resolveProfileDir(env, argv)
 
   const empty: InstalledInventory = { profile, baseline: 0, plugins: [] }
   const manifest = readJson(join(dir, 'package.json'))

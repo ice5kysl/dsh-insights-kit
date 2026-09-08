@@ -29,6 +29,19 @@
  *   version + plugin-flag per row, plus the in-box baseline count. Local
  *   filesystem only, no upstream fetch; never blocks on a Remote namespace.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
+ * - `POST /dsh-insights/install`   — one-click install into the active
+ *   profile (`pnpm add` + append to `dsh.profile.bundles`), restricted to
+ *   package names the corpus knows as plugins; body `{name}`.
+ * - `POST /dsh-insights/uninstall` — drop from the bundles load list +
+ *   `pnpm remove`, restricted to actually-installed names; body `{name}`.
+ *
+ * Mutations are guarded beyond the host-trust gate: POST only, a custom
+ * `x-dsh-insights-kit: mutate` header is required (cross-origin pages cannot
+ * set it without a preflight this server never answers), a strict npm-name
+ * check runs before anything touches disk or spawns pnpm (arg-array, no
+ * shell), the @deepseek-ai/* baseline is never mutable, and
+ * `DSH_INSIGHTS_NO_MUTATE=1` disables the whole surface. Changes take effect
+ * on the next `dsh web` restart.
  *
  * Every request passes a host-trust gate mirroring the official /api fence:
  * loopback authorities are trusted; anything else needs a same-origin browser
@@ -45,7 +58,10 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
-import { readInstalledInventory } from './installed.ts'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { readInstalledInventory, resolveProfileDir } from './installed.ts'
+import { installPackage, isMutablePackage, pnpmAvailable, uninstallPackage, type OpKind } from './ops.ts'
 import {
   UpstreamError,
   auditByNpm,
@@ -168,13 +184,25 @@ async function handleRequest(
     sendJson(res, 403, { ok: false, error: wireError('forbidden', 'untrusted host/origin') })
     return
   }
-  if (req.method !== 'GET') {
-    sendJson(res, 405, { ok: false, error: wireError('method-not-allowed', 'only GET is served') })
-    return
-  }
   const url = new URL(req.url ?? '/', 'http://localhost')
   const pathname = url.pathname.replace(/\/+$/, '') || '/'
+  const mutationOp: OpKind | null = pathname === `${PREFIX}/install`
+    ? 'install'
+    : pathname === `${PREFIX}/uninstall`
+      ? 'uninstall'
+      : null
+  if (mutationOp !== null ? req.method !== 'POST' : req.method !== 'GET') {
+    sendJson(res, 405, {
+      ok: false,
+      error: wireError('method-not-allowed', mutationOp !== null ? 'POST only for install/uninstall' : 'only GET is served here'),
+    })
+    return
+  }
   try {
+    if (mutationOp !== null) {
+      await handleMutation(req, res, store, mutationOp)
+      return
+    }
     if (pathname === `${PREFIX}/plugin`) {
       const fullName = (url.searchParams.get('full_name') ?? '').trim()
       if (!/^[\w.-]+\/[\w.-]+$/.test(fullName)) {
@@ -295,6 +323,10 @@ async function handleRequest(
         plugin: 'dsh-insights-kit',
         uptimeMs: Date.now() - startedAt,
         caches: store.status(),
+        // The client renders one-click install/uninstall buttons only when
+        // this is true (kill switch off AND pnpm runnable); older builds lack
+        // the routes entirely and the client falls back to copy-commands.
+        mutations: !mutationsDisabled() && await pnpmAvailable(),
       })
       return
     }
@@ -311,6 +343,8 @@ async function handleRequest(
           '/dsh-insights/runtime',
           '/dsh-insights/installed',
           '/dsh-insights/health',
+          'POST /dsh-insights/install',
+          'POST /dsh-insights/uninstall',
         ],
       })
       return
@@ -330,6 +364,105 @@ async function handleRequest(
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(JSON.stringify(body))
+}
+
+// ── mutations (one-click install/uninstall) ─────────────────────────────────
+
+/** Kill switch: any truthy-but-"0" value disables the mutation surface. */
+function mutationsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.DSH_INSIGHTS_NO_MUTATE
+  return value !== undefined && value !== '' && value !== '0'
+}
+
+/**
+ * Cross-origin pages cannot set this header without a CORS preflight this
+ * server never answers, so requiring it blocks browser-borne CSRF outright
+ * (the host-trust gate already pins Host/Origin to the loopback authority).
+ */
+const MUTATION_HEADER = 'x-dsh-insights-kit'
+const MAX_BODY_BYTES = 4096
+
+/** Read a small JSON body; null on anything malformed or oversized. */
+function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
+  return new Promise((resolvePromise) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        req.destroy()
+        resolvePromise(null)
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try {
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        resolvePromise(typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : null)
+      } catch {
+        resolvePromise(null)
+      }
+    })
+    req.on('error', () => resolvePromise(null))
+  })
+}
+
+async function handleMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: InsightsStore,
+  op: OpKind,
+): Promise<void> {
+  if (mutationsDisabled()) {
+    sendJson(res, 403, { ok: false, error: wireError('mutations-disabled', 'mutations disabled (DSH_INSIGHTS_NO_MUTATE)') })
+    return
+  }
+  if (req.headers[MUTATION_HEADER] !== 'mutate') {
+    sendJson(res, 403, { ok: false, error: wireError('mutation-header-required', `missing ${MUTATION_HEADER}: mutate`) })
+    return
+  }
+  const body = await readJsonBody(req)
+  const name = typeof body?.name === 'string' ? body.name.trim() : ''
+  if (!isMutablePackage(name)) {
+    sendJson(res, 400, { ok: false, error: wireError('invalid-name', 'name must be a non-official npm package name') })
+    return
+  }
+  const { profile, dir } = resolveProfileDir()
+  if (!existsSync(join(dir, 'package.json'))) {
+    sendJson(res, 500, { ok: false, error: wireError('profile-missing', `profile ${profile} has no manifest at ${dir}`) })
+    return
+  }
+  const inventory = readInstalledInventory()
+  const installed = inventory.plugins.some((plugin) => plugin.name.toLowerCase() === name.toLowerCase())
+
+  if (op === 'install') {
+    if (installed) {
+      sendJson(res, 200, { ok: true, name, op, status: 'done', note: 'already-installed', restartRequired: false })
+      return
+    }
+    // Scope installs to plugin packages the corpus knows — the buttons exist
+    // to install vetted ecosystem plugins, not arbitrary npm packages.
+    const data = await store.insights()
+    const known = data.plugins.some((plugin) => plugin.pkgName?.toLowerCase() === name.toLowerCase())
+    if (!known) {
+      sendJson(res, 400, { ok: false, error: wireError('not-in-corpus', `${name} is not a plugin package in the dsh-insights corpus`) })
+      return
+    }
+    const result = await installPackage(dir, name)
+    sendJson(res, result.ok ? 200 : 500, { ok: result.ok, name, op, status: result.status, detail: result.detail, restartRequired: result.ok })
+    return
+  }
+
+  if (!installed) {
+    sendJson(res, 404, { ok: false, error: wireError('not-installed', `${name} is not installed in profile ${profile}`) })
+    return
+  }
+  const result = await uninstallPackage(dir, name)
+  const code = result.ok ? 200 : result.status === 'partial' ? 200 : 500
+  sendJson(res, code, { ok: result.ok, name, op, status: result.status, detail: result.detail, restartRequired: result.status !== 'failed' })
 }
 
 // ── host-trust gate (mirrors the official /api fence posture) ───────────────

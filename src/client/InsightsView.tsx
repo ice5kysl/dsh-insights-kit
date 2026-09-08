@@ -46,7 +46,9 @@ import {
   fetchPlugin,
   fetchRuntime,
   fetchScenarios,
+  installPlugin,
   searchPlugins,
+  uninstallPlugin,
   type DynamicsDoc,
   type DropSeverity,
   type PluginCard,
@@ -57,7 +59,14 @@ import {
   type SearchHit,
   type SimilarPick,
 } from './api.ts'
-import { getInstalled, installedNameSet, type InstalledPlugin } from './inventory.ts'
+import {
+  getInstalled,
+  INSTALLED_CHANGED_EVENT,
+  installedNameSet,
+  invalidateInstalled,
+  mutationsAvailable,
+  type InstalledPlugin,
+} from './inventory.ts'
 import { isOutdated, satisfiesSimpleRange } from '../shared/compat.ts'
 import { getLocale, L, setLocalePreference } from './locale.ts'
 import { PANEL_EVENT } from './SidebarAction.tsx'
@@ -174,9 +183,10 @@ const copyButtonStyle: CSSProperties = {
 
 /**
  * One-shot copy-to-clipboard button for a terminal command (`dsh plugin …`).
- * The panel stays read-only: it never installs/removes anything itself.
- * Shows「已复制 ✓」for ~2s after a successful copy. stopPropagation keeps the
- * surrounding row's onPick from firing.
+ * Used as the fallback when the host reports one-click mutations unusable
+ * (older build / kill switch / no pnpm). Shows「已复制 ✓」for ~2s after a
+ * successful copy. stopPropagation keeps the surrounding row's onPick from
+ * firing.
  */
 function CopyCommandButton(props: { command: string; label: string }): JSX.Element {
   const { command, label } = props
@@ -195,6 +205,109 @@ function CopyCommandButton(props: { command: string; label: string }): JSX.Eleme
     >
       {copied ? L('已复制 ✓', 'Copied ✓') : label}
     </button>
+  )
+}
+
+/**
+ * Re-render trigger for installed-state consumers: bumps every time a
+ * successful install/uninstall invalidates the inventory.
+ */
+function useInstalledEpoch(): number {
+  const [epoch, setEpoch] = useState(0)
+  useEffect(() => {
+    const bump = () => setEpoch((value) => value + 1)
+    window.addEventListener(INSTALLED_CHANGED_EVENT, bump)
+    return () => window.removeEventListener(INSTALLED_CHANGED_EVENT, bump)
+  }, [])
+  return epoch
+}
+
+/**
+ * One-click install/uninstall against the local profile (host POST routes:
+ * pnpm + bundles edit). Renders the plain copy-command button instead while
+ * the capability probe is pending or the host reports mutations unusable
+ * (older build / kill switch / no pnpm) — the panel never hard-depends on
+ * the mutation surface. On success the installed inventory is invalidated
+ * and every section re-reads it (「已安装」pills and the 体检 list flip).
+ */
+function InstallActionButton(props: { pkgName: string; installed: boolean; profile?: string }): JSX.Element {
+  const { pkgName, installed, profile } = props
+  const [canMutate, setCanMutate] = useState<boolean | null>(null)
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle')
+  const [message, setMessage] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    void mutationsAvailable().then((available) => {
+      if (!cancelled) setCanMutate(available)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Reset any transient result when the row's installed state flips.
+  useEffect(() => {
+    setState('idle')
+    setMessage('')
+  }, [installed])
+
+  const command = `dsh plugin --profile ${profile ?? 'web'} ${installed ? 'remove' : 'add'} ${pkgName}`
+  if (canMutate !== true) {
+    return (
+      <CopyCommandButton
+        command={command}
+        label={installed ? L('复制卸载命令', 'Copy uninstall command') : L('复制安装命令', 'Copy install command')}
+      />
+    )
+  }
+
+  const run = async (): Promise<void> => {
+    setState('busy')
+    setMessage('')
+    try {
+      const result = installed ? await uninstallPlugin(pkgName) : await installPlugin(pkgName)
+      invalidateInstalled()
+      if (result.note === 'already-installed') {
+        setState('done')
+        setMessage(L('已安装，无需重复操作', 'Already installed'))
+      } else if (result.restartRequired) {
+        setState('done')
+        setMessage(installed
+          ? L('已卸载 ✓ 重启 dsh web 后完全生效', 'Uninstalled ✓ restart `dsh web` to finish')
+          : L('已安装 ✓ 重启 dsh web 后生效', 'Installed ✓ restart `dsh web` to activate'))
+      } else {
+        setState('done')
+        setMessage(L('已完成 ✓', 'Done ✓'))
+      }
+    } catch (error) {
+      setState('error')
+      setMessage(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+      <button
+        style={copyButtonStyle}
+        disabled={state === 'busy'}
+        title={L('直接在本机 profile 执行（pnpm），重启 dsh web 后生效', 'Runs against the local profile (pnpm); restart `dsh web` to take effect')}
+        onClick={(event) => {
+          event.stopPropagation()
+          void run()
+        }}
+      >
+        {state === 'busy'
+          ? (installed ? L('卸载中…', 'Uninstalling…') : L('安装中…', 'Installing…'))
+          : (installed ? L('卸载', 'Uninstall') : L('安装', 'Install'))}
+      </button>
+      {state === 'done' && message && <span style={{ ...mutedStyle, color: '#16a34a' }}>{message}</span>}
+      {state === 'error' && (
+        <span style={{ ...mutedStyle, color: '#dc2626' }} title={message}>
+          {L('操作失败', 'Failed')}{message ? `：${message.slice(0, 120)}` : ''}
+        </span>
+      )}
+    </span>
   )
 }
 
@@ -403,6 +516,9 @@ function auditCacheWrite(name: string, version: string | null, card: PluginCard 
 function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Element {
   const { onPick } = props
   const [audit, setAudit] = useState<AuditState>({ form: 'loading' })
+  // Bumps when a one-click install/uninstall lands elsewhere in the panel:
+  // re-read the (invalidated) inventory and re-render the list.
+  const epoch = useInstalledEpoch()
 
   useEffect(() => {
     let cancelled = false
@@ -465,7 +581,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [epoch])
 
   if (audit.form === 'loading') return <div style={mutedStyle}>{L('正在读取已装插件清单…', 'Reading the installed-plugin list…')}</div>
 
@@ -597,10 +713,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                       ? L('未收录（不在权威集）', 'unlisted (not in the corpus)')
                       : L('工具依赖（非插件，不参与体检）', 'utility dependency (not a plugin, not audited)')}
                   </span>
-                  <CopyCommandButton
-                    command={`dsh plugin --profile ${profile} remove ${row.name}`}
-                    label={L('复制卸载命令', 'Copy uninstall command')}
-                  />
+                  <InstallActionButton pkgName={row.name} installed profile={profile} />
                 </li>
               )
             }
@@ -632,10 +745,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                       {L('同类更优替代 ↗', 'better alternatives ↗')}
                     </a>
                   )}
-                  <CopyCommandButton
-                    command={`dsh plugin --profile ${profile} remove ${row.name}`}
-                    label={L('复制卸载命令', 'Copy uninstall command')}
-                  />
+                  <InstallActionButton pkgName={row.name} installed profile={profile} />
                 </div>
                 <CompatLine compat={card.compat} dshVersion={audit.dshVersion} />
               </li>
@@ -647,8 +757,8 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
       <BreakingCard releases={releases} />
       <div style={mutedStyle}>
         {L(
-          '「复制卸载命令」只复制到剪贴板：在终端执行，完成后重启 dsh web 生效。',
-          'The copy-uninstall button only copies to the clipboard: run it in a terminal; restart `dsh web` to take effect.',
+          '「卸载」按钮直接在本机 profile 执行（pnpm + 装载清单），重启 dsh web 生效；旧版 host 上退化为复制命令。',
+          'The uninstall button runs against the local profile (pnpm + the load list); restart `dsh web` to take effect. On older host builds it falls back to copying the command.',
         )}
       </div>
       <div style={{ ...mutedStyle, marginTop: 4 }}>
@@ -909,7 +1019,9 @@ function HealthCard(props: {
   // Installed-plugin names (npm) from the local profile manifest (via the
   // host /dsh-insights/installed route), for the install/uninstall action.
   // Unavailable/failed enumeration → treat as not-installed (the plain
-  // install command is shown), never an error.
+  // install command is shown), never an error. Re-reads when a one-click
+  // mutation lands anywhere in the panel (epoch bump).
+  const epoch = useInstalledEpoch()
   const [installedNames, setInstalledNames] = useState<ReadonlySet<string> | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -919,7 +1031,7 @@ function HealthCard(props: {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [epoch])
   const installed = card.npm !== null && installedNames?.has(card.npm) === true
 
   return (
@@ -937,22 +1049,15 @@ function HealthCard(props: {
         </div>
       </div>
 
-      {/* Install/uninstall actions — read-only: the buttons only copy the
-          `dsh plugin` command to the clipboard. */}
+      {/* Install/uninstall: one-click against the local profile when the
+          host reports mutations usable; the copy-command fallback otherwise. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
         {card.npm ? (
           <>
             {installed && <span style={installedPillStyle}>{L('已安装', 'Installed')}</span>}
-            <CopyCommandButton
-              command={installed
-                ? `dsh plugin --profile web remove ${card.npm}`
-                : `dsh plugin --profile web add ${card.npm}`}
-              label={installed
-                ? L('复制卸载命令', 'Copy uninstall command')
-                : L('复制安装命令', 'Copy install command')}
-            />
+            <InstallActionButton pkgName={card.npm} installed={installed} />
             <span style={mutedStyle}>
-              {L('复制后在终端执行，重启 dsh web 生效', 'Copied to the clipboard — run in a terminal, then restart `dsh web`')}
+              {L('本机执行（pnpm），重启 dsh web 生效；旧版 host 上为复制命令', 'Runs locally (pnpm), restart `dsh web` to take effect; copies the command on older host builds')}
             </span>
           </>
         ) : (
@@ -1067,6 +1172,9 @@ function ScenariosSection(props: {
 }): JSX.Element {
   const { doc, state, error, onPick } = props
   const [installed, setInstalled] = useState<ReadonlySet<string>>(EMPTY_SET)
+  // Bumps when a one-click install/uninstall lands (possibly on another tab):
+  // re-resolve the「已安装」markers from the invalidated inventory.
+  const epoch = useInstalledEpoch()
 
   // Resolve the set of installed corpus plugins once on mount: installed npm
   // names (local profile manifest via /dsh-insights/installed) → batch audit
@@ -1093,7 +1201,7 @@ function ScenariosSection(props: {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [epoch])
 
   if (state === 'loading' || state === 'idle') return <div style={mutedStyle}>{L('加载场景推荐…', 'Loading scenario picks…')}</div>
   if (state === 'error') return <ErrorNote error={error} />
@@ -1106,8 +1214,8 @@ function ScenariosSection(props: {
       </div>
       <div style={{ ...mutedStyle, marginBottom: 12 }}>
         {L(
-          '「复制安装/卸载命令」只复制到剪贴板：在终端执行，完成后重启 dsh web 生效。',
-          'The copy install/uninstall buttons only copy to the clipboard: run in a terminal; restart `dsh web` to take effect.',
+          '「安装/卸载」直接在本机 profile 执行（pnpm + 装载清单），重启 dsh web 生效；旧版 host 上退化为复制命令。',
+          'Install/uninstall runs against the local profile (pnpm + the load list); restart `dsh web` to take effect. On older host builds the buttons fall back to copying the command.',
         )}
       </div>
       {scenarios.map((scenario) => (
@@ -1155,14 +1263,7 @@ function ScenariosSection(props: {
                       )}
                     </button>
                     {plugin.pkgName && (
-                      <CopyCommandButton
-                        command={isInstalled
-                          ? `dsh plugin --profile web remove ${plugin.pkgName}`
-                          : `dsh plugin --profile web add ${plugin.pkgName}`}
-                        label={isInstalled
-                          ? L('复制卸载命令', 'Copy uninstall command')
-                          : L('复制安装命令', 'Copy install command')}
-                      />
+                      <InstallActionButton pkgName={plugin.pkgName} installed={isInstalled} />
                     )}
                   </div>
                 </li>

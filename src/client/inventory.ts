@@ -20,7 +20,7 @@
  * @module dsh-insights-kit/inventory
  */
 
-import { fetchInstalled, type InstalledPlugin } from './api.ts'
+import { fetchHealth, fetchInstalled, type InstalledPlugin } from './api.ts'
 
 export type { InstalledPlugin }
 
@@ -48,5 +48,37 @@ export function getInstalled(): Promise<InstalledInventory | null> {
 /** Convenience: the installed npm package names as a set (for「已安装」pills). */
 export async function installedNameSet(): Promise<ReadonlySet<string>> {
   const inventory = await getInstalled()
-  return new Set((inventory?.plugins ?? []).map((plugin) => plugin.name))
+  return new Set((inventory?.plugins ?? []).filter((plugin) => plugin.enabled).map((plugin) => plugin.name))
+}
+
+// ── mutation capability + change propagation ────────────────────────────────
+
+let mutationsPromise: Promise<boolean> | null = null
+
+/**
+ * Whether the host face reports usable one-click mutations (kill switch off
+ * AND pnpm runnable), per /dsh-insights/health. False on older builds (the
+ * probe 404s), which flips the UI back to copy-commands.
+ */
+export function mutationsAvailable(): Promise<boolean> {
+  mutationsPromise ??= fetchHealth()
+    .then((health) => health.mutations === true)
+    .catch(() => false)
+  return mutationsPromise
+}
+
+/** Fired (window event) after a successful install/uninstall. */
+export const INSTALLED_CHANGED_EVENT = 'dsh-insights-kit:installed-changed'
+
+/**
+ * Drop the memoized inventory and notify the panel sections to re-read it.
+ * Called after any successful profile mutation.
+ */
+export function invalidateInstalled(): void {
+  installedPromise = null
+  try {
+    window.dispatchEvent(new Event(INSTALLED_CHANGED_EVENT))
+  } catch {
+    // non-browser context — nothing subscribed anyway
+  }
 }

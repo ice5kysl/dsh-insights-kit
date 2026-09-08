@@ -11,7 +11,9 @@
  * then exercises trimming, drop enrichment, search matching/ranking/limits,
  * scenarios pkgName annotation, the audit compat slice, the runtime-version
  * probe, the profile-manifest installed inventory (baseline filtering,
- * version resolution, missing-dir degradation), passthrough, cache health,
+ * version resolution, missing-dir degradation), the mutation surface
+ * (install/uninstall round-trip against a stub pnpm, header/kill-switch/
+ * name-validation gates, failure rollback), passthrough, cache health,
  * the trust gate, and the upstream-failure → 502 path (a second apply
  * pointed at a dead port with an empty cache). The author self-check is
  * tested as a library (runSelfcheck from src/host/selfcheck.ts, imported via
@@ -23,7 +25,7 @@
 
 import { createServer, request as httpRequest } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -78,6 +80,14 @@ const INSIGHTS = {
       full_name: 'ddd/no-health',
       stars: 5,
       description: 'Fresh repo, not yet scored',
+    },
+    {
+      // Corpus-known package whose stub-pnpm install always fails — exercises
+      // the mutation failure path (500 + detail, manifest untouched).
+      full_name: 'zzz/fail-pkg',
+      stars: 1,
+      pkgName: 'fail-pkg',
+      description: 'Install always fails in the smoke fixtures',
     },
   ],
 }
@@ -300,6 +310,42 @@ writeTree(profileFixture, {
   'node_modules/plain-util/package.json': JSON.stringify({ name: 'plain-util', version: '3.2.1' }),
 })
 process.env.DSH_INSIGHTS_PROFILE_DIR = profileFixture
+
+// Stub pnpm for the mutation routes: `--version` probes ok; `add`/`remove`
+// edit the CWD profile manifest's dependencies; `fail-pkg` simulates a
+// registry failure. Pointed to via DSH_INSIGHTS_PNPM (set before any /health
+// call so the memoized capability probe uses it).
+const mutateFixture = join(fixtureRoot, 'profile-mutate')
+writeTree(mutateFixture, {
+  'package.json': JSON.stringify({
+    name: 'dsh-profile-mutate',
+    dependencies: { '@deepseek-ai/dsh-base': '0.1.2-rc.1' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+  }, null, 2),
+})
+writeTree(fixtureRoot, {
+  'pnpm-stub.sh': '#!/usr/bin/env bash\nexec node "$(dirname "$0")/pnpm-stub.mjs" "$@"\n',
+  'pnpm-stub.mjs': [
+    'import { readFileSync, writeFileSync } from "node:fs"',
+    'import { join } from "node:path"',
+    'const args = process.argv.slice(2)',
+    'if (args[0] === "--version") { console.log("10.34.5-stub"); process.exit(0) }',
+    'const [cmd, name] = args',
+    'const file = join(process.cwd(), "package.json")',
+    'const manifest = JSON.parse(readFileSync(file, "utf8"))',
+    'manifest.dependencies ??= {}',
+    'if (cmd === "add") {',
+    '  if (name === "fail-pkg") { console.error("stub: simulated registry 404"); process.exit(1) }',
+    '  manifest.dependencies[name] = "^9.9.9-stub"',
+    '} else if (cmd === "remove") {',
+    '  delete manifest.dependencies[name]',
+    '} else { console.error("stub: unknown cmd"); process.exit(2) }',
+    'writeFileSync(file, JSON.stringify(manifest, null, 2) + "\\n")',
+    'console.log(`stub pnpm ${cmd} ${name} ok`)',
+  ].join('\n'),
+})
+chmodSync(join(fixtureRoot, 'pnpm-stub.sh'), 0o755)
+process.env.DSH_INSIGHTS_PNPM = join(fixtureRoot, 'pnpm-stub.sh')
 
 // Identical to good-plugin but without engines.dsh — isolates the zero-weight
 // hint: the score must stay 100/S and the CLI exit code 0.
@@ -581,6 +627,111 @@ await check('installed degrades to an empty inventory when the profile dir is mi
   } finally {
     process.env.DSH_INSIGHTS_PROFILE_DIR = saved
   }
+})
+
+// ── mutations: POST install/uninstall against the mutate fixture profile ────
+
+async function postJson(path, body, headers = {}) {
+  const res = await fetch(base + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  })
+  return { status: res.status, body: await res.json() }
+}
+
+const MUTATE_HEADERS = { 'x-dsh-insights-kit': 'mutate' }
+const readManifest = (dir) => JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+
+await check('mutation: GET on install path -> 405', async () => {
+  const { status } = await getJson('/install')
+  if (status !== 405) throw new Error(`status ${status}`)
+})
+
+await check('mutation: POST without the custom header -> 403', async () => {
+  const { status, body } = await postJson('/install', { name: 'dsh-alpha' })
+  if (status !== 403 || body.error?.code !== 'mutation-header-required') throw new Error(`status ${status} ${JSON.stringify(body)}`)
+})
+
+await check('mutation: malformed/official names -> 400 invalid-name', async () => {
+  for (const name of ['--help', '; rm -rf /', 'not a name', '@deepseek-ai/dsh-base', '']) {
+    const { status, body } = await postJson('/install', { name }, MUTATE_HEADERS)
+    if (status !== 400 || body.error?.code !== 'invalid-name') throw new Error(`${JSON.stringify(name)}: status ${status}`)
+  }
+})
+
+await check('mutation: install name not in the corpus -> 400 not-in-corpus', async () => {
+  const { status, body } = await postJson('/install', { name: 'unknown-pkg' }, MUTATE_HEADERS)
+  if (status !== 400 || body.error?.code !== 'not-in-corpus') throw new Error(`status ${status} ${JSON.stringify(body)}`)
+})
+
+await check('mutation: full install → already-installed → uninstall → not-installed round-trip', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    // install a corpus plugin package (dsh-alpha): deps + bundles both gain it
+    const add = await postJson('/install', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (add.status !== 200 || add.body.ok !== true || add.body.restartRequired !== true) {
+      throw new Error(`install: ${add.status} ${JSON.stringify(add.body)}`)
+    }
+    let manifest = readManifest(mutateFixture)
+    if (!manifest.dependencies['dsh-alpha']) throw new Error('deps not updated')
+    if (!manifest.dsh.profile.bundles.includes('dsh-alpha')) throw new Error('bundles not updated')
+    // baseline manifest fields untouched
+    if (manifest.dsh.profile.bundles.filter((b) => b.startsWith('@deepseek-ai/')).length !== 2) {
+      throw new Error('baseline bundles clobbered')
+    }
+    // second install is a noop
+    const again = await postJson('/install', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (again.status !== 200 || again.body.note !== 'already-installed') throw new Error(`reinstall: ${JSON.stringify(again.body)}`)
+    // uninstall: bundles + deps both drop it
+    const remove = await postJson('/uninstall', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (remove.status !== 200 || remove.body.ok !== true) throw new Error(`uninstall: ${JSON.stringify(remove.body)}`)
+    manifest = readManifest(mutateFixture)
+    if ('dsh-alpha' in manifest.dependencies) throw new Error('deps still carry dsh-alpha')
+    if (manifest.dsh.profile.bundles.includes('dsh-alpha')) throw new Error('bundles still carry dsh-alpha')
+    // uninstalling again -> 404 not-installed
+    const gone = await postJson('/uninstall', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (gone.status !== 404 || gone.body.error?.code !== 'not-installed') throw new Error(`gone: ${gone.status} ${JSON.stringify(gone.body)}`)
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('mutation: pnpm failure -> 500 with detail, manifest untouched', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    const before = readManifest(mutateFixture)
+    const res = await postJson('/install', { name: 'fail-pkg' }, MUTATE_HEADERS)
+    if (res.status !== 500 || res.body.ok !== false || res.body.status !== 'failed') {
+      throw new Error(`expected 500 failed: ${res.status} ${JSON.stringify(res.body)}`)
+    }
+    if (!res.body.detail || !res.body.detail.includes('simulated registry 404')) {
+      throw new Error(`pnpm output tail missing: ${JSON.stringify(res.body)}`)
+    }
+    const after = readManifest(mutateFixture)
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('manifest mutated on failed install')
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('mutation: kill switch DSH_INSIGHTS_NO_MUTATE -> 403', async () => {
+  const saved = process.env.DSH_INSIGHTS_NO_MUTATE
+  process.env.DSH_INSIGHTS_NO_MUTATE = '1'
+  try {
+    const { status, body } = await postJson('/uninstall', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (status !== 403 || body.error?.code !== 'mutations-disabled') throw new Error(`status ${status} ${JSON.stringify(body)}`)
+  } finally {
+    if (saved === undefined) delete process.env.DSH_INSIGHTS_NO_MUTATE
+    else process.env.DSH_INSIGHTS_NO_MUTATE = saved
+  }
+})
+
+await check('health reports mutations: true (stub pnpm probed)', async () => {
+  const { body } = await getJson('/health')
+  if (body.mutations !== true) throw new Error(`mutations flag wrong: ${JSON.stringify(body.mutations)}`)
 })
 
 await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {
