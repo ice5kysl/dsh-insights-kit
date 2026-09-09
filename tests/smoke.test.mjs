@@ -2,8 +2,10 @@
  * Standalone smoke test for the host face (no cordis runtime needed, no real
  * upstream). Boots:
  *
- *   1. a fixture server serving small insights/scenarios/dynamics/compat
- *      JSON docs,
+ *   1. a fixture server serving small insights/scenarios/dynamics/compat/
+ *      enrich/compat-observed JSON docs (compat-observed is the small
+ *      synthetic tests/fixtures/compat-observed.json — never the real 1MB+
+ *      matrix),
  *   2. a fake npm registry (selfcheck npm-consistency checks),
  *   3. a tiny node:http server that mimics the `ctx.webServer` route contract
  *      and hands matching /dsh-insights requests to the plugin's handler,
@@ -32,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { disableEntry, parseSimplePatch } from '../src/host/hot.ts'
 import { extractRequires, extractSeedWords } from '../src/host/shell.ts'
+import { computeUpgradeCheck, observedAtShell, observedByPkg } from '../src/host/upstream.ts'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
 import { classifyCheckInput } from '../src/client/api.ts'
@@ -160,11 +163,17 @@ const ENRICH = [
   { full_name: 'ddd/no-health', category: null, score: null, grade: null, stars: 5 },
 ]
 
+// compat-observed.json: the observed load-test matrix (plugin × shell version
+// → ok/broken). A small synthetic doc from tests/fixtures/ — statuses seen in
+// the real matrix are exactly 'ok' and 'broken'; dsh-sparse exercises the
+// sparse-results case (only some shell versions tested).
+const COMPAT_OBSERVED = JSON.parse(readFileSync(join(rootDir, 'tests/fixtures/compat-observed.json'), 'utf8'))
+
 // ── fixture upstream ─────────────────────────────────────────────────────────
 
 const fixture = createServer((req, res) => {
   const name = (req.url ?? '').replace(/^\//, '')
-  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT, 'enrich.json': ENRICH }
+  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT, 'enrich.json': ENRICH, 'compat-observed.json': COMPAT_OBSERVED }
   if (docs[name]) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(docs[name]))
@@ -176,6 +185,24 @@ const fixture = createServer((req, res) => {
 await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve))
 const fixturePort = fixture.address().port
 process.env.DSH_INSIGHTS_UPSTREAM_BASE = `http://127.0.0.1:${fixturePort}`
+
+// Legacy upstream: the same five documents but NO compat-observed.json (the
+// pre-matrix site) — the observed annotations must silently disappear, never
+// error. A second plugin instance is pointed at it inside the degradation
+// test and disposed there.
+const legacyFixture = createServer((req, res) => {
+  const name = (req.url ?? '').replace(/^\//, '')
+  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT, 'enrich.json': ENRICH }
+  if (docs[name]) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(docs[name]))
+  } else {
+    res.writeHead(404)
+    res.end('nope')
+  }
+})
+await new Promise((resolve) => legacyFixture.listen(0, '127.0.0.1', resolve))
+const legacyFixturePort = legacyFixture.address().port
 
 // ── fake npm registry (selfcheck consistency checks) ────────────────────────
 
@@ -1166,6 +1193,177 @@ await check('scenarios passthrough + pkgName annotation from the corpus', async 
   if (beta.grade !== 'S' || beta.reasons?.[0] !== '标签: archive') throw new Error('pick fields not preserved')
 })
 
+await check('scenarios annotate the observed matrix (verdict + atCurrentShell), observedAt attached', async () => {
+  // The annotation join: pick pkgName → observed plugins key (lowercased).
+  // atCurrentShell follows the RUNNING dsh version — null in this dev
+  // checkout (no @deepseek-ai/dsh-* resolvable), so assert the shape against
+  // whatever /runtime reports.
+  const { body: runtime } = await getJson('/runtime')
+  const running = runtime.dsh?.version ?? null
+  const { status, body } = await getJson('/scenarios')
+  if (status !== 200) throw new Error(`status ${status}`)
+  if (body.scenarios?.observedAt !== '2026-09-08T00:00:00.000Z') {
+    throw new Error(`observedAt wrong: ${body.scenarios?.observedAt}`)
+  }
+  const [beta, gamma] = body.scenarios.scenarios[0].plugins
+  if (beta.observed?.verdict !== 'broken-since') throw new Error(`beta verdict wrong: ${JSON.stringify(beta.observed)}`)
+  const betaResults = COMPAT_OBSERVED.plugins['dsh-beta'].results
+  const expectedAt = running === null || !(running in betaResults)
+    ? null
+    : betaResults[running].status === 'ok'
+      ? 'ok'
+      : 'fail'
+  if (beta.observed?.atCurrentShell !== expectedAt) {
+    throw new Error(`beta atCurrentShell wrong (running ${running}): ${JSON.stringify(beta.observed)}`)
+  }
+  // gamma has no pkgName → no observed join at all.
+  if ('observed' in gamma) throw new Error('observed must be omitted when the pick has no corpus pkgName')
+})
+
+await check('observedByPkg indexes by lowercased npm name and tolerates malformed rows', async () => {
+  const map = observedByPkg(COMPAT_OBSERVED)
+  if (map.size !== 3) throw new Error(`size ${map.size}`)
+  const alpha = map.get('dsh-alpha')
+  if (alpha?.verdict !== 'ok' || alpha.results['0.1.2-rc.1']?.status !== 'ok') throw new Error(`alpha wrong: ${JSON.stringify(alpha)}`)
+  const beta = map.get('dsh-beta')
+  const missing = beta?.results['0.1.3-alpha.2']?.missing
+  if (beta?.verdict !== 'broken-since' || !Array.isArray(missing) || missing[0] !== '@deepseek-ai/dsh-client-runtime/client') {
+    throw new Error(`beta wrong: ${JSON.stringify(beta)}`)
+  }
+  // Sparse results: only the tested shell versions are kept.
+  const sparse = map.get('dsh-sparse')
+  if (Object.keys(sparse?.results ?? {}).join(',') !== '0.1.3-alpha.2') throw new Error(`sparse wrong: ${JSON.stringify(sparse)}`)
+  // Malformed inputs degrade piecemeal, never throw.
+  for (const doc of [null, undefined, [], {}, { plugins: [] }, { plugins: null }]) {
+    if (observedByPkg(doc).size !== 0) throw new Error(`malformed doc must yield an empty map: ${JSON.stringify(doc)}`)
+  }
+  const messy = observedByPkg({
+    plugins: {
+      // Non-string status dropped, verdict kept; bad rows skipped.
+      'Dsh-Mixed': { results: { '1.0.0': { status: 123 }, '1.0.1': { status: 'ok' } }, verdict: { cls: 'ok' } },
+      bad: 'not-an-object',
+    },
+  })
+  const mixed = messy.get('dsh-mixed')
+  if (messy.size !== 1 || mixed?.verdict !== 'ok' || Object.keys(mixed.results).join(',') !== '1.0.1') {
+    throw new Error(`messy doc wrong: ${JSON.stringify([...messy])}`)
+  }
+})
+
+await check('observedAtShell maps ok/broken/untested to the wire tri-state', async () => {
+  const map = observedByPkg(COMPAT_OBSERVED)
+  const alpha = map.get('dsh-alpha')
+  const beta = map.get('dsh-beta')
+  if (observedAtShell(alpha, '0.1.2-rc.1').atCurrentShell !== 'ok') throw new Error('ok case wrong')
+  const broken = observedAtShell(beta, '0.1.3-alpha.2')
+  // The real matrix calls failures 'broken' — anything non-ok is a fail.
+  if (broken.atCurrentShell !== 'fail' || broken.missing?.[0] !== '@deepseek-ai/dsh-client-runtime/client') {
+    throw new Error(`broken case wrong: ${JSON.stringify(broken)}`)
+  }
+  if ('missing' in observedAtShell(alpha, '0.1.2-rc.1')) throw new Error('ok must not carry missing')
+  if (observedAtShell(alpha, '0.0.0-untested').atCurrentShell !== null) throw new Error('untested shell must be null')
+  if (observedAtShell(alpha, null).atCurrentShell !== null) throw new Error('null shell must be null')
+  if (observedAtShell(undefined, '0.1.2-rc.1').atCurrentShell !== null) throw new Error('unknown plugin must be null')
+})
+
+await check('computeUpgradeCheck: latest from the matrix tag, per-plugin status at latest', async () => {
+  const res = computeUpgradeCheck(COMPAT_OBSERVED, DYNAMICS, ['dsh-alpha', 'dsh-beta', 'dsh-sparse', 'plain-util'], '0.1.1-rc.1')
+  if (res.available !== true || res.latest !== '0.1.2-rc.1' || res.current !== '0.1.1-rc.1') {
+    throw new Error(`head wrong: ${JSON.stringify(res)}`)
+  }
+  if (res.observedAt !== '2026-09-08T00:00:00.000Z') throw new Error(`observedAt wrong: ${res.observedAt}`)
+  const byName = Object.fromEntries(res.rows.map((r) => [r.name, r.status]))
+  // alpha+beta are ok AT latest; sparse was only tested on 0.1.3-alpha.2;
+  // plain-util is not in the matrix at all.
+  if (byName['dsh-alpha'] !== 'ok' || byName['dsh-beta'] !== 'ok' || byName['dsh-sparse'] !== 'unknown' || byName['plain-util'] !== 'unknown') {
+    throw new Error(`rows wrong: ${JSON.stringify(byName)}`)
+  }
+  const { ok, fail, unknown, total } = res.counts
+  if (ok !== 2 || fail !== 0 || unknown !== 2 || total !== 4) throw new Error(`counts wrong: ${JSON.stringify(res.counts)}`)
+})
+
+await check('computeUpgradeCheck: name join is case-insensitive, broken maps to fail', async () => {
+  const atNext = { ...COMPAT_OBSERVED, shellDistTags: { latest: '0.1.3-alpha.2' } }
+  const res = computeUpgradeCheck(atNext, null, ['DSH-Alpha', 'dsh-beta'], '0.1.2-rc.1')
+  const byName = Object.fromEntries(res.rows.map((r) => [r.name, r.status]))
+  if (res.latest !== '0.1.3-alpha.2' || byName['DSH-Alpha'] !== 'ok' || byName['dsh-beta'] !== 'fail') {
+    throw new Error(`rows wrong: ${JSON.stringify(res)}`)
+  }
+  if (res.counts.fail !== 1 || res.counts.ok !== 1) throw new Error(`counts wrong: ${JSON.stringify(res.counts)}`)
+})
+
+await check('computeUpgradeCheck: degradation paths (no current / tag outside matrix / dynamics fallback)', async () => {
+  // Unknown running version → unavailable, rows still computed.
+  const noCurrent = computeUpgradeCheck(COMPAT_OBSERVED, null, ['dsh-alpha'], null)
+  if (noCurrent.available !== false || noCurrent.current !== null || noCurrent.latest !== '0.1.2-rc.1') {
+    throw new Error(`no-current wrong: ${JSON.stringify(noCurrent)}`)
+  }
+  // A dist-tag pointing outside the matrix is treated as unknown (the matrix
+  // predates it — nothing has observed results there).
+  const ahead = computeUpgradeCheck({ ...COMPAT_OBSERVED, shellDistTags: { latest: '9.9.9' } }, null, ['dsh-alpha'], '0.1.1-rc.1')
+  if (ahead.available !== false || ahead.latest !== null) throw new Error(`ahead wrong: ${JSON.stringify(ahead)}`)
+  // No compat-observed doc at all (old site) → dynamics dist-tag fallback;
+  // every row is unknown without the matrix, observedAt null.
+  const legacy = computeUpgradeCheck(null, { dsh: { npm: { distTags: { latest: '0.1.3-alpha.2' } } } }, ['dsh-alpha'], '0.1.2-rc.1')
+  if (legacy.available !== true || legacy.latest !== '0.1.3-alpha.2' || legacy.observedAt !== null) {
+    throw new Error(`legacy wrong: ${JSON.stringify(legacy)}`)
+  }
+  if (legacy.rows[0]?.status !== 'unknown' || legacy.counts.unknown !== 1) {
+    throw new Error(`legacy rows wrong: ${JSON.stringify(legacy)}`)
+  }
+  // Fallback latest outside the (present) matrix is likewise unknown.
+  const legacyAhead = computeUpgradeCheck(COMPAT_OBSERVED, { dsh: { npm: { distTags: { latest: '9.9.9' } } } }, ['dsh-alpha'], '0.1.2-rc.1')
+  // …compat-observed's own tag wins over the dynamics fallback.
+  if (legacyAhead.latest !== '0.1.2-rc.1') throw new Error(`priority wrong: ${JSON.stringify(legacyAhead)}`)
+})
+
+await check('upgrade-check route: rows/counts/latest from the fixture matrix', async () => {
+  // dshVersion() is null in this dev checkout, so available tracks it; the
+  // rows/counts/latest come from the fixture regardless. Enabled plugins of
+  // profileFixture: dsh-alpha, dsh-beta, dsh-pending, plain-util,
+  // dsh-bundle-only (dsh-disabled is out of the load list).
+  const { status, body } = await getJson('/upgrade-check')
+  if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+  if (body.latest !== '0.1.2-rc.1') throw new Error(`latest wrong: ${JSON.stringify(body)}`)
+  if (body.available !== (typeof body.current === 'string')) throw new Error(`available wrong: ${JSON.stringify(body)}`)
+  if (body.observedAt !== '2026-09-08T00:00:00.000Z') throw new Error(`observedAt wrong: ${body.observedAt}`)
+  const byName = Object.fromEntries((body.rows ?? []).map((r) => [r.name, r.status]))
+  if (byName['dsh-alpha'] !== 'ok' || byName['dsh-beta'] !== 'ok') throw new Error(`rows wrong: ${JSON.stringify(byName)}`)
+  if (byName['dsh-pending'] !== 'unknown' || byName['plain-util'] !== 'unknown' || byName['dsh-bundle-only'] !== 'unknown') {
+    throw new Error(`unknown rows wrong: ${JSON.stringify(byName)}`)
+  }
+  if ('dsh-disabled' in byName) throw new Error('disabled plugins must be excluded')
+  const { ok, fail, unknown, total } = body.counts ?? {}
+  if (ok !== 2 || fail !== 0 || unknown !== 3 || total !== 5) throw new Error(`counts wrong: ${JSON.stringify(body.counts)}`)
+})
+
+await check('legacy upstream (no compat-observed.json): scenarios + upgrade-check degrade silently', async () => {
+  const saved = process.env.DSH_INSIGHTS_UPSTREAM_BASE
+  const effectsBefore = effects.length
+  process.env.DSH_INSIGHTS_UPSTREAM_BASE = `http://127.0.0.1:${legacyFixturePort}`
+  try {
+    apply(fakeCtx)
+    // The legacy instance is the newest registration, so these requests hit it.
+    const scenarios = await getJson('/scenarios')
+    if (scenarios.status !== 200) throw new Error(`/scenarios status ${scenarios.status}`)
+    const [beta] = scenarios.body.scenarios.scenarios[0].plugins
+    if ('observed' in beta) throw new Error(`observed must be omitted without the matrix: ${JSON.stringify(beta)}`)
+    if (scenarios.body.scenarios.observedAt !== null) throw new Error('observedAt must be null without the matrix')
+    if (beta.pkgName !== 'dsh-beta') throw new Error('pkgName annotation must survive the missing matrix')
+    const upgrade = await getJson('/upgrade-check')
+    if (upgrade.status !== 200 || upgrade.body.ok !== true) throw new Error(`/upgrade-check status ${upgrade.status}`)
+    // The DYNAMICS fixture carries no dist-tags, so no latest is known.
+    if (upgrade.body.available !== false || upgrade.body.latest !== null) {
+      throw new Error(`legacy upgrade-check wrong: ${JSON.stringify(upgrade.body)}`)
+    }
+  } finally {
+    process.env.DSH_INSIGHTS_UPSTREAM_BASE = saved
+    // Dispose the extra instance so later tests (effects[1] = the dead-port
+    // instance) see the same registration indices as before.
+    for (const dispose of effects.splice(effectsBefore)) dispose()
+  }
+})
+
 await check('dynamics passthrough', async () => {
   const { status, body } = await getJson('/dynamics')
   if (status !== 200 || body.dynamics?.dsh?.releases?.[0]?.breaking !== true) throw new Error(`status ${status}`)
@@ -1174,7 +1372,7 @@ await check('dynamics passthrough', async () => {
 await check('health reports cache ages for loaded docs', async () => {
   const { status, body } = await getJson('/health')
   if (status !== 200 || !body.ok) throw new Error(`status ${status}`)
-  for (const name of ['insights', 'scenarios', 'dynamics', 'compat', 'enrich']) {
+  for (const name of ['insights', 'scenarios', 'dynamics', 'compat', 'enrich', 'compatObserved']) {
     const entry = body.caches?.[name]
     if (!entry?.cached || typeof entry.ageMs !== 'number' || entry.ageMs < 0 || entry.stale) {
       throw new Error(`cache ${name} status wrong: ${JSON.stringify(entry)}`)
@@ -1402,6 +1600,7 @@ await check('first instance cache survives second instance failure', async () =>
 
 await new Promise((resolve) => server.close(resolve))
 await new Promise((resolve) => fixture.close(resolve))
+await new Promise((resolve) => legacyFixture.close(resolve))
 await new Promise((resolve) => registry.close(resolve))
 
 if (failed > 0) {

@@ -11,6 +11,9 @@
  * - `dynamics.json`  (dsh releases + platform repo activity)
  * - `compat.json`    (per-plugin engines.dsh / dsh-peer compat signals)
  * - `enrich.json`    (per-plugin score/grade/category — same-category picks)
+ * - `compat-observed.json` (observed load-test matrix: plugin × shell version
+ *   → ok/broken; newer site builds only — every consumer must degrade
+ *   silently when it 404s)
  *
  * The store is dependency-injected (`fetchJson`, `baseUrl`, `ttlMs`) so the
  * smoke test can run it against a local fixture server with no network.
@@ -35,6 +38,7 @@ const DEFAULT_DOC_URLS: Record<string, string> = {
   dynamics: `${DEFAULT_BASE_URL}/dynamics.json`,
   compat: `${DEFAULT_BASE_URL}/compat.json`,
   enrich: `${DEFAULT_BASE_URL}/enrich.json`,
+  compatObserved: `${DEFAULT_BASE_URL}/compat-observed.json`,
 }
 
 // ── upstream wire shapes (only the fields this plugin reads) ─────────────────
@@ -156,6 +160,181 @@ export function similarByCategory(doc: unknown, fullName: string, limit = 5): Si
       score: typeof r.score === 'number' ? r.score : null,
       stars: typeof r.stars === 'number' ? r.stars : 0,
     }))
+}
+
+// ── compat-observed.json (observed load-test matrix, CC BY 4.0) ─────────────
+//
+// The site's runner actually boots each plugin's client bundle against a
+// matrix of historical dsh shell builds. Wire shape (all fields optional in
+// practice — parse defensively):
+//
+//   { generatedAt, allShellVersions: string[], shellDistTags: {latest,…},
+//     plugins: { <npm name>: { repo, version, requires,
+//       results: { <shell version>: {status:'ok'} | {status:'broken',missing[]} },
+//       verdict: { cls: 'ok'|'never'|'broken-since'|'supported-since'|'mixed' } } } }
+//
+// Observed statuses seen in the wild are exactly 'ok' and 'broken'; anything
+// else string-shaped is treated as a failure by the mappings below.
+
+/** One observed load outcome at one shell version. */
+export interface ObservedResult {
+  status: string
+  missing: string[]
+}
+
+/** The per-plugin observed slice (keyed by npm package name, lowercased). */
+export interface ObservedPlugin {
+  /** verdict.cls passthrough ('ok' / 'never' / 'broken-since' / …), null when absent. */
+  verdict: string | null
+  /** shell version → observed outcome; sparse — absent versions mean untested. */
+  results: Record<string, ObservedResult>
+}
+
+/**
+ * Index compat-observed.json by lowercased npm package name. Anything
+ * malformed (no plugins object, non-object rows, non-string statuses) is
+ * skipped piecemeal — a partial document still annotates what it can.
+ */
+export function observedByPkg(doc: unknown): Map<string, ObservedPlugin> {
+  const map = new Map<string, ObservedPlugin>()
+  const plugins = (doc as { plugins?: unknown } | null)?.plugins
+  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return map
+  for (const [name, row] of Object.entries(plugins as Record<string, unknown>)) {
+    if (!name || typeof row !== 'object' || row === null) continue
+    const resultsRaw = (row as { results?: unknown }).results
+    const results: Record<string, ObservedResult> = {}
+    if (typeof resultsRaw === 'object' && resultsRaw !== null && !Array.isArray(resultsRaw)) {
+      for (const [shell, entry] of Object.entries(resultsRaw as Record<string, unknown>)) {
+        if (!shell || typeof entry !== 'object' || entry === null) continue
+        const status = (entry as { status?: unknown }).status
+        if (typeof status !== 'string' || !status) continue
+        const missingRaw = (entry as { missing?: unknown }).missing
+        results[shell] = {
+          status,
+          missing: Array.isArray(missingRaw)
+            ? missingRaw.filter((m): m is string => typeof m === 'string')
+            : [],
+        }
+      }
+    }
+    const cls = (row as { verdict?: { cls?: unknown } | null }).verdict?.cls
+    map.set(name.toLowerCase(), {
+      verdict: typeof cls === 'string' && cls ? cls : null,
+      results,
+    })
+  }
+  return map
+}
+
+/** The doc-level generatedAt, when present. */
+export function observedGeneratedAt(doc: unknown): string | null {
+  const at = (doc as { generatedAt?: unknown } | null)?.generatedAt
+  return typeof at === 'string' && at ? at : null
+}
+
+/** The wire tri-state for one plugin at one shell version. */
+export interface ObservedAtShell {
+  /** 'ok' | 'fail' (any non-ok status) | null (plugin/shell version untested). */
+  atCurrentShell: 'ok' | 'fail' | null
+  /** Unresolvable modules at that shell (present only on a fail with a list). */
+  missing?: string[]
+}
+
+/**
+ * One plugin's observed outcome at one shell version (typically the running
+ * dsh version): null when either side is unknown or the matrix never tested
+ * that combination; any non-'ok' status maps to 'fail'.
+ */
+export function observedAtShell(entry: ObservedPlugin | undefined, shell: string | null): ObservedAtShell {
+  if (!entry || !shell) return { atCurrentShell: null }
+  const result = entry.results[shell]
+  if (!result) return { atCurrentShell: null }
+  if (result.status === 'ok') return { atCurrentShell: 'ok' }
+  return {
+    atCurrentShell: 'fail',
+    ...(result.missing.length > 0 ? { missing: result.missing } : {}),
+  }
+}
+
+// ── upgrade-check (实测矩阵 × 已装清单) ──────────────────────────────────────
+
+export type UpgradeRowStatus = 'ok' | 'fail' | 'unknown'
+
+export interface UpgradeCheckRow {
+  name: string
+  status: UpgradeRowStatus
+}
+
+export interface UpgradeCheckResult {
+  /** False when there is nothing to compare (no current version / no known latest). */
+  available: boolean
+  current: string | null
+  latest: string | null
+  counts: { ok: number; fail: number; unknown: number; total: number }
+  rows: UpgradeCheckRow[]
+  /** compat-observed generatedAt (null when the doc is absent). */
+  observedAt: string | null
+}
+
+/**
+ * The latest shell version worth comparing against: compat-observed's
+ * shellDistTags.latest first (it is guaranteed to be in the matrix), the
+ * dynamics.json dsh dist-tag latest as fallback. A candidate that is not in
+ * the matrix's version list counts as unknown (the matrix predates it, so no
+ * plugin has observed results there) and the next candidate is tried.
+ */
+function resolveObservedLatest(doc: unknown, dynamics: unknown): string | null {
+  const versionsRaw = (doc as { allShellVersions?: unknown } | null)?.allShellVersions
+  const matrix = Array.isArray(versionsRaw)
+    ? versionsRaw.filter((v): v is string => typeof v === 'string' && v.length > 0)
+    : []
+  const candidates: unknown[] = [
+    (doc as { shellDistTags?: { latest?: unknown } | null } | null)?.shellDistTags?.latest,
+    (dynamics as { dsh?: { npm?: { distTags?: { latest?: unknown } | null } | null } | null } | null)?.dsh?.npm?.distTags?.latest,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || !candidate) continue
+    if (matrix.length > 0 && !matrix.includes(candidate)) continue
+    return candidate
+  }
+  return null
+}
+
+/**
+ * Should-dsh-be-upgraded computation: each installed plugin's observed status
+ * AT the latest shell version ('ok' / 'fail' / 'unknown' when the plugin or
+ * the version is untested). Pure — current/latest/counts are reported, the
+ * comparison verdict is the client's call (base-version compare). Not
+ * available when the running version is unknown or no latest is known.
+ */
+export function computeUpgradeCheck(
+  doc: unknown,
+  dynamics: unknown,
+  installed: readonly string[],
+  current: string | null,
+): UpgradeCheckResult {
+  const observed = observedByPkg(doc)
+  const latest = resolveObservedLatest(doc, dynamics)
+  const counts = { ok: 0, fail: 0, unknown: 0, total: installed.length }
+  const rows: UpgradeCheckRow[] = installed.map((name) => {
+    const entry = observed.get(name.toLowerCase())
+    const result = latest !== null ? entry?.results[latest] : undefined
+    const status: UpgradeRowStatus = result === undefined
+      ? 'unknown'
+      : result.status === 'ok'
+        ? 'ok'
+        : 'fail'
+    counts[status] += 1
+    return { name, status }
+  })
+  return {
+    available: current !== null && latest !== null,
+    current,
+    latest,
+    counts,
+    rows,
+    observedAt: observedGeneratedAt(doc),
+  }
 }
 
 // ── trimmed shapes served to the browser ─────────────────────────────────────
@@ -291,7 +470,20 @@ export async function defaultFetchJson(url: string): Promise<unknown> {
   }
 }
 
-type CacheName = 'insights' | 'scenarios' | 'dynamics' | 'compat' | 'enrich'
+type CacheName = 'insights' | 'scenarios' | 'dynamics' | 'compat' | 'enrich' | 'compatObserved'
+
+/**
+ * On-disk document file names per cache entry — the cache name is camelCase
+ * for readability while the site serves kebab-case (`compat-observed.json`).
+ */
+const DOC_FILES: Record<CacheName, string> = {
+  insights: 'insights',
+  scenarios: 'scenarios',
+  dynamics: 'dynamics',
+  compat: 'compat',
+  enrich: 'enrich',
+  compatObserved: 'compat-observed',
+}
 
 interface CacheEntry {
   data: unknown
@@ -318,6 +510,7 @@ export interface InsightsStore {
   dynamics(): Promise<unknown>
   compat(): Promise<unknown>
   enrich(): Promise<unknown>
+  compatObserved(): Promise<unknown>
   status(): Record<CacheName, CacheStatus>
 }
 
@@ -336,7 +529,7 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
   const inflight = new Map<CacheName, Promise<unknown>>()
 
   function docUrl(name: CacheName): string {
-    return baseUrl ? `${baseUrl}/${name}.json` : (DEFAULT_DOC_URLS[name] ?? `${DEFAULT_BASE_URL}/${name}.json`)
+    return baseUrl ? `${baseUrl}/${DOC_FILES[name]}.json` : (DEFAULT_DOC_URLS[name] ?? `${DEFAULT_BASE_URL}/${DOC_FILES[name]}.json`)
   }
 
   async function load(name: CacheName): Promise<unknown> {
@@ -365,8 +558,9 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
     dynamics: () => load('dynamics'),
     compat: () => load('compat'),
     enrich: () => load('enrich'),
+    compatObserved: () => load('compatObserved'),
     status() {
-      const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat', 'enrich']
+      const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat', 'enrich', 'compatObserved']
       const out = {} as Record<CacheName, CacheStatus>
       for (const name of names) {
         const hit = cache.get(name)

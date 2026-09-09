@@ -21,9 +21,14 @@
  *    stale-while-revalidate): reopening the panel paints cached cards
  *    instantly while unchanged versions re-verify in the background. When
  *    the installed read fails, the page degrades to dist-tags + breaking
- *    releases + advised actions.
+ *    releases + advised actions. An「升级 dsh」banner on top compares the
+ *    running dsh against the latest shell in the observed load-test matrix
+ *    (host /dsh-insights/upgrade-check), green when every installed plugin
+ *    is observed-compatible there, red when any fails.
  * 2. 场景 Scenarios  — scenario → recommended plugins; clicking a plugin
- *    jumps to Check with it loaded.
+ *    jumps to Check with it loaded. Picks carry an「实测兼容」badge when the
+ *    observed matrix (compat-observed.json) has a load-test outcome for the
+ *    running dsh version.
  * 3. 查验 Check      — paste `owner/repo` / a GitHub URL for the exact health
  *    card (grade badge, score, dimension bars, deduction list, link out to
  *    the full page on dsh-insights.com), or type a bare keyword to search
@@ -47,6 +52,7 @@ import {
   fetchPlugin,
   fetchRuntime,
   fetchScenarios,
+  fetchUpgradeCheck,
   installPlugin,
   searchPlugins,
   uninstallPlugin,
@@ -59,9 +65,11 @@ import {
   type PluginCompat,
   type ReleaseRow,
   type Scenario,
+  type ScenarioObserved,
   type ScenariosDoc,
   type SearchHit,
   type SimilarPick,
+  type UpgradeCheck,
 } from './api.ts'
 import {
   getInstalled,
@@ -487,6 +495,116 @@ function CompatLine({ compat, dshVersion }: { compat: PluginCompat | null | unde
 
 // ── section: 体检 Audit ──────────────────────────────────────────────────────
 
+/**
+ *「实测兼容」badge on scenario picks (fed by compat-observed.json via the
+ * host /scenarios annotation): the plugin's observed load outcome at the
+ * RUNNING dsh version. Renders nothing when the matrix does not cover the
+ * plugin or the running version — the row then looks exactly as before.
+ */
+function ObservedBadge({ observed, observedAt }: { observed?: ScenarioObserved; observedAt?: string | null }): JSX.Element | null {
+  if (!observed) return null
+  const at = (observedAt ?? '').slice(0, 10) || '?'
+  if (observed.atCurrentShell === 'ok') {
+    return (
+      <span
+        style={{ ...installedPillStyle, color: '#16a34a', borderColor: '#16a34a' }}
+        title={L('实测：当前 dsh 版本可加载 · 数据截至 {at}', 'Observed: loads on the current dsh build · data as of {at}', { at })}
+      >
+        ✓ {L('实测兼容', 'observed ok')}
+      </span>
+    )
+  }
+  if (observed.atCurrentShell === 'fail') {
+    const mods = (observed.missing ?? []).join(', ')
+    return (
+      <span
+        style={{ ...installedPillStyle, color: '#dc2626', borderColor: '#dc2626' }}
+        title={mods
+          ? L('实测：当前 dsh 版本加载失败，缺失模块：{mods}', 'Observed: fails to load on the current dsh build; missing modules: {mods}', { mods })
+          : L('实测：当前 dsh 版本加载失败', 'Observed: fails to load on the current dsh build')}
+      >
+        ⚠ {L('实测加载失败', 'observed failing')}
+      </span>
+    )
+  }
+  return null
+}
+
+/**
+ *「升级 dsh」banner at the top of the Audit tab, fed by the host
+ * /dsh-insights/upgrade-check (observed load-test matrix × the enabled
+ * installed list). Renders nothing while the probe is pending, on older
+ * hosts without the route, or when the host has nothing to compare
+ * (available:false). The version comparison is base-version only
+ * (prerelease tags dropped) — conservative for dsh's all-prerelease train.
+ */
+function UpgradeBanner(): JSX.Element | null {
+  const [check, setCheck] = useState<UpgradeCheck | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    fetchUpgradeCheck()
+      .then((res) => {
+        if (!cancelled && res.available) setCheck(res)
+      })
+      .catch(() => {
+        // older host / fetch failure — no banner, never an error
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  if (!check || !check.current || !check.latest) return null
+  const outdated = isOutdated(check.current, check.latest)
+  if (outdated === null) return null
+  const { ok, fail, unknown, total } = check.counts
+  const failedNames = check.rows.filter((row) => row.status === 'fail').map((row) => row.name)
+  if (!outdated) {
+    return (
+      <div style={{ ...cardStyle, borderLeft: '3px solid #16a34a' }}>
+        <div style={mutedStyle}>
+          <span style={{ color: '#16a34a' }}>✓ </span>
+          {L(
+            'dsh 已是最新（{cur}）· 已装 {total} 个插件在当前版本实测 {ok} 兼容',
+            'dsh is up to date ({cur}) · {total} installed, {ok} observed compatible on the current build',
+            { cur: check.current, total, ok },
+          )}
+          {fail > 0 && (
+            <span style={{ color: '#dc2626' }} title={failedNames.join(', ')}>
+              {L('、{n} 个加载失败', ', {n} failing to load', { n: fail })}
+            </span>
+          )}
+        </div>
+      </div>
+    )
+  }
+  if (fail === 0) {
+    return (
+      <div style={{ ...cardStyle, borderLeft: '3px solid #16a34a' }}>
+        <div style={mutedStyle}>
+          {L(
+            'dsh {lat} 已发布：已装 {total} 个实测 {ok} 兼容',
+            'dsh {lat} is out: {total} installed, {ok} observed compatible',
+            { lat: check.latest, total, ok },
+          )}
+          {unknown > 0 && L('、{n} 个未实测', ', {n} untested', { n: unknown })}
+          {L('，可以升', ' — safe to upgrade')}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div style={{ ...cardStyle, borderLeft: '3px solid #dc2626' }}>
+      <div style={{ ...mutedStyle, color: '#dc2626' }} title={failedNames.join(', ')}>
+        {L(
+          '⚠ 先别升 dsh {lat}：{n} 个已装插件在新版实测加载失败（{names}）',
+          '⚠ Hold off on dsh {lat}: {n} installed plugin(s) fail to load on it ({names})',
+          { lat: check.latest, n: fail, names: failedNames.join(', ') },
+        )}
+      </div>
+    </div>
+  )
+}
+
 type AuditForm = 'loading' | 'full' | 'degraded'
 
 /**
@@ -727,6 +845,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
     return (
       <div>
         <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
+        <UpgradeBanner />
         <div style={cardStyle}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
             {L('无法读取已装插件清单', 'Cannot read the installed-plugin list')}
@@ -778,6 +897,8 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
   return (
     <div>
       <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
+
+      <UpgradeBanner />
 
       {upgradePending && (
         <div style={{ ...cardStyle, borderLeft: '3px solid #ca8a04' }}>
@@ -1465,6 +1586,7 @@ function ScenariosSection(props: {
                       <GradeBadge grade={plugin.grade} />
                       <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{plugin.full_name}</span>
                       {isInstalled && <span style={installedPillStyle}>{L('已安装', 'Installed')}</span>}
+                      <ObservedBadge observed={plugin.observed} observedAt={doc?.observedAt} />
                       {typeof plugin.stars === 'number' && <Stars n={plugin.stars} />}
                       {plugin.reasons && plugin.reasons.length > 0 && (
                         <span style={{ ...mutedStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

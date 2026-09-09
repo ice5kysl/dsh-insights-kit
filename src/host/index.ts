@@ -18,7 +18,9 @@
  *   compat.json) attached to hits.
  * - `GET /dsh-insights/scenarios` — scenarios.json, with each pick annotated
  *   by its npm `pkgName` (joined from the corpus on `full_name`) so the
- *   client can offer copyable install/uninstall commands.
+ *   client can offer copyable install/uninstall commands, plus an `observed`
+ *   slice (compat-observed verdict + outcome at the running dsh version)
+ *   when the upstream publishes compat-observed.json.
  * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
  * - `GET /dsh-insights/runtime`   — the running dsh version (resolved from
  *   the installed @deepseek-ai/dsh-web-app / dsh-base package.json; null
@@ -33,6 +35,11 @@
  *   every enabled plugin's require set against the on-disk shell's seed words
  *   + graph rows (what the NEXT `dsh web` boot resolves), flagging plugins
  *   that would crash the loader on the current/next dsh build.
+ * - `GET /dsh-insights/upgrade-check` — "should I upgrade dsh": the running
+ *   version vs the latest shell in the observed compat matrix
+ *   (compat-observed.json, dynamics dist-tags as fallback), with every
+ *   enabled installed plugin's observed load outcome at that latest version;
+ *   `available:false` when the current version or a known latest is missing.
  * - `POST /dsh-insights/install`   — one-click install into the active
  *   profile (`pnpm add` + append to `dsh.profile.bundles`), restricted to
  *   package names the corpus knows as plugins; body `{name}`.
@@ -79,7 +86,11 @@ import {
   UpstreamError,
   auditByNpm,
   compatByNpm,
+  computeUpgradeCheck,
   createStore,
+  observedAtShell,
+  observedByPkg,
+  observedGeneratedAt,
   searchPlugins,
   similarByCategory,
   trimPlugin,
@@ -200,7 +211,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log, () => loaderRef, ctx),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,compat,health} + POST install/uninstall (hot-mount capable)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,compat,upgrade-check,health} + POST install/uninstall (hot-mount capable)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -315,12 +326,20 @@ async function handleRequest(
       return
     }
     if (pathname === `${PREFIX}/scenarios`) {
-      // Passthrough plus a `pkgName` annotation per pick (joined from the
-      // corpus on full_name, omitted when the corpus has no row) so the
-      // client can offer copyable `dsh plugin add/remove` commands. Response
-      // shape stays backward-compatible: picks only gain an optional field.
+      // Passthrough plus per-pick annotations (joined from the corpus on
+      // full_name, omitted when the corpus has no row):
+      // - `pkgName` so the client can offer copyable `dsh plugin add/remove`
+      //   commands;
+      // - `observed` — the compat-observed load-test verdict + the outcome at
+      //   the RUNNING dsh version (null when that version was never tested).
+      // compat-observed.json only exists on newer site builds: a 404/parse
+      // failure degrades to no annotation rather than failing the response.
+      // Response shape stays backward-compatible: picks only gain fields.
       const doc = (await store.scenarios()) as ScenariosDocShape
       const data = await store.insights()
+      const observedDoc = await store.compatObserved().catch(() => null)
+      const observed = observedByPkg(observedDoc)
+      const currentShell = dshVersion()
       const pkgByRepo = new Map<string, string>()
       for (const p of data.plugins) {
         if (p.pkgName) pkgByRepo.set(p.full_name.toLowerCase(), p.pkgName)
@@ -329,10 +348,24 @@ async function handleRequest(
         ...scenario,
         plugins: (scenario.plugins ?? []).map((plugin) => {
           const pkgName = pkgByRepo.get((plugin.full_name ?? '').toLowerCase())
-          return pkgName ? { ...plugin, pkgName } : plugin
+          const annotated = pkgName ? { ...plugin, pkgName } : { ...plugin }
+          const entry = pkgName ? observed.get(pkgName.toLowerCase()) : undefined
+          if (!entry) return pkgName ? annotated : plugin
+          const { atCurrentShell, missing } = observedAtShell(entry, currentShell)
+          return {
+            ...annotated,
+            observed: {
+              verdict: entry.verdict,
+              atCurrentShell,
+              ...(missing ? { missing } : {}),
+            },
+          }
         }),
       }))
-      sendJson(res, 200, { ok: true, scenarios: { ...doc, scenarios } })
+      sendJson(res, 200, {
+        ok: true,
+        scenarios: { ...doc, scenarios, observedAt: observedGeneratedAt(observedDoc) },
+      })
       return
     }
     if (pathname === `${PREFIX}/dynamics`) {
@@ -358,6 +391,24 @@ async function handleRequest(
       // "will it survive the running/next dsh build" pre-check. shell is null
       // when the install tree cannot be located.
       sendJson(res, 200, { ok: true, compat: checkClientCompat() })
+      return
+    }
+    if (pathname === `${PREFIX}/upgrade-check`) {
+      // Local + upstream combined: the running dsh version vs the latest
+      // shell in the observed compat matrix, with every enabled installed
+      // plugin's observed load outcome AT that latest version. Both upstream
+      // docs degrade to null on failure (older sites lack compat-observed
+      // entirely) — the answer then is available:false, never an error.
+      const inventory = readInstalledInventory()
+      const observedDoc = await store.compatObserved().catch(() => null)
+      const dynamicsDoc = await store.dynamics().catch(() => null)
+      const installed = inventory.plugins
+        .filter((plugin) => plugin.enabled)
+        .map((plugin) => plugin.name)
+      sendJson(res, 200, {
+        ok: true,
+        ...computeUpgradeCheck(observedDoc, dynamicsDoc, installed, dshVersion()),
+      })
       return
     }
     if (pathname === `${PREFIX}/health`) {
@@ -390,6 +441,7 @@ async function handleRequest(
           '/dsh-insights/runtime',
           '/dsh-insights/installed',
           '/dsh-insights/compat',
+          '/dsh-insights/upgrade-check',
           '/dsh-insights/health',
           'POST /dsh-insights/install',
           'POST /dsh-insights/uninstall',

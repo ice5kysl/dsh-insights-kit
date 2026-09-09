@@ -54,6 +54,19 @@ export interface SearchHit {
   description: string | null
 }
 
+/**
+ * Observed load-test annotation on a scenario pick (host-joined from
+ * compat-observed.json): the site-wide verdict class plus the outcome at the
+ * RUNNING dsh version (null when that version was never tested). Absent
+ * entirely when the upstream does not publish the matrix.
+ */
+export interface ScenarioObserved {
+  verdict: string | null
+  atCurrentShell: 'ok' | 'fail' | null
+  /** Modules the bundle failed to resolve at the current shell (fail only). */
+  missing?: string[]
+}
+
 export interface ScenarioPlugin {
   full_name: string
   url?: string
@@ -66,6 +79,8 @@ export interface ScenarioPlugin {
   /** npm package name, annotated host-side from the corpus (drives the
    *  copyable install/uninstall command button); absent when unknown. */
   pkgName?: string
+  /** Observed load-test annotation; absent when untested or upstream-less. */
+  observed?: ScenarioObserved
 }
 
 export interface Scenario {
@@ -79,6 +94,8 @@ export interface Scenario {
 export interface ScenariosDoc {
   generatedAt?: string
   scenarios?: Scenario[]
+  /** compat-observed.json generatedAt, annotated host-side (null when absent). */
+  observedAt?: string | null
 }
 
 export interface ReleaseRow {
@@ -317,6 +334,29 @@ export interface ClientCompatReport {
 /** Local pre-check against the shell's module table; absent on older hosts. */
 export async function fetchCompat(): Promise<{ compat: ClientCompatReport }> {
   return getJson('compat')
+}
+
+// ── upgrade-check (实测矩阵 × 已装清单 → 升级建议横幅) ──────────────────────
+
+export interface UpgradeCheckRow {
+  name: string
+  /** Observed outcome at the latest matrix shell ('unknown' = untested). */
+  status: 'ok' | 'fail' | 'unknown'
+}
+
+export interface UpgradeCheck {
+  /** False when there is nothing to compare — render no banner. */
+  available: boolean
+  current: string | null
+  latest: string | null
+  counts: { ok: number; fail: number; unknown: number; total: number }
+  rows: UpgradeCheckRow[]
+  observedAt: string | null
+}
+
+/** The dsh upgrade verdict against the observed matrix; absent on older hosts. */
+export async function fetchUpgradeCheck(): Promise<UpgradeCheck> {
+  return getJson('upgrade-check')
 }
 
 /**
