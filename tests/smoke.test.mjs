@@ -31,6 +31,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { disableEntry, parseSimplePatch } from '../src/host/hot.ts'
+import { extractRequires, extractSeedWords } from '../src/host/shell.ts'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
 import { classifyCheckInput } from '../src/client/api.ts'
@@ -314,8 +315,13 @@ writeTree(profileFixture, {
       },
     },
   }, null, 2),
-  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
-  'node_modules/dsh-beta/package.json': JSON.stringify({ name: 'dsh-beta', version: '2.1.0', cordis: {} }),
+  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }),
+  // alpha's client bundle requires only seed words + an in-box graph row
+  // (dsh-client-ui-foo from the fixture install tree) → compat status ok.
+  'node_modules/dsh-alpha/lib/client.js': 'const a = require("react")\nconst b = require("@deepseek-ai/dsh-client-store")\nconst c = require("@deepseek-ai/dsh-client-ui-foo/client")\nconsole.log(a, b, c)\n',
+  'node_modules/dsh-beta/package.json': JSON.stringify({ name: 'dsh-beta', version: '2.1.0', cordis: {}, dsh: { client: { platform: 'web' } } }),
+  // beta's client bundle still requires the module rc.1 dropped → broken.
+  'node_modules/dsh-beta/lib/client.js': 'const a = require("react")\nconst stale = require("@deepseek-ai/dsh-client-runtime/client")\nconsole.log(a, stale)\n',
   'node_modules/plain-util/package.json': JSON.stringify({ name: 'plain-util', version: '3.2.1' }),
 })
 process.env.DSH_INSIGHTS_PROFILE_DIR = profileFixture
@@ -328,9 +334,17 @@ const mutateFixture = join(fixtureRoot, 'profile-mutate')
 writeTree(mutateFixture, {
   'package.json': JSON.stringify({
     name: 'dsh-profile-mutate',
-    dependencies: { '@deepseek-ai/dsh-base': '0.1.2-rc.1' },
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    dependencies: {
+      '@deepseek-ai/dsh-base': '0.1.2-rc.1',
+      // Reverse-dependency guard pair: consumer depends on shared, so
+      // uninstalling shared must 409 until consumer is removed first.
+      'dsh-shared': '^1.0.0',
+      'dsh-consumer': '^2.0.0',
+    },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-shared', 'dsh-consumer'] } },
   }, null, 2),
+  'node_modules/dsh-shared/package.json': JSON.stringify({ name: 'dsh-shared', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+  'node_modules/dsh-consumer/package.json': JSON.stringify({ name: 'dsh-consumer', version: '2.0.0', dependencies: { 'dsh-shared': '^1.0.0' }, dsh: { bundle: { patch: './cordis.patch.yml' } } }),
   // Pre-materialized package tree for the hot-mountable fixture plugin: the
   // stub pnpm only edits the manifest, so the patch + pkg.json the hot mount
   // reads must already exist.
@@ -378,6 +392,20 @@ writeTree(fixtureRoot, {
 })
 process.env.DSH_INSIGHTS_INCLUDE_MODULE = join(fixtureRoot, 'include-stub.mjs')
 
+// Fixture dsh install tree for the shell module-table check: a minified-shape
+// shell asset whose seed table is react / react/jsx-runtime / cordis /
+// dsh-client-store, an in-box client package (graph-row arm), and the version
+// carrier. Pointed to via DSH_INSIGHTS_DSH_ROOT (the /compat route and the
+// selfcheck seed guard both resolve it from env).
+const dshRoot = join(fixtureRoot, 'dsh-root')
+writeTree(dshRoot, {
+  'node_modules/@deepseek-ai/dsh-web-app/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-web-app', version: '9.9.9-fixture' }),
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/index-fake.js':
+    '!function(){const q5=1,Y5=2,M5=3,M6=4;function zp(){return{react:q5,"react/jsx-runtime":Y5,"@deepseek-ai/cordis":M5,"@deepseek-ai/dsh-client-store":M6}};boot({staticModules:zp()})}()\n',
+  'node_modules/@deepseek-ai/dsh-client-ui-foo/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-client-ui-foo', version: '9.9.9-fixture', dsh: { client: { platform: 'web' } } }),
+})
+process.env.DSH_INSIGHTS_DSH_ROOT = dshRoot
+
 // Identical to good-plugin but without engines.dsh — isolates the zero-weight
 // hint: the score must stay 100/S and the CLI exit code 0.
 const { engines: _omitEngines, ...GOOD_NO_ENGINES } = GOOD_PKG
@@ -387,6 +415,38 @@ writeTree(hintDir, {
   'cordis.patch.yml': '- insert:\n    - id: good\n      name: good-pkg\n',
   'lib/index.js': 'export const name = "good"\n',
   'lib/client.js': 'window.__ModuleLoader__ = window.__ModuleLoader__ || {}\n',
+  'README.md': `# good-pkg\n\n${'A well-documented fixture plugin. '.repeat(20)}\n`,
+  'README.zh-CN.md': '# good-pkg\n\n中文文档。\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/good.test.mjs': 'import test from "node:test"\ntest("ok", () => {})\n',
+  '.github/workflows/ci.yml': 'name: ci\non: [push]\n',
+  'src/index.ts': 'export function apply(): void {\n  element.textContent = "safe"\n}\n',
+})
+
+// Seed-guard fixtures: same well-built shape (npm name reuses the registry
+// fixture's good-pkg so the npm rules stay green), differing only in the
+// client bundle's requires — one stale (rc.1-dropped) module vs seed-only.
+const guardDir = join(fixtureRoot, 'guard-plugin')
+writeTree(guardDir, {
+  'package.json': JSON.stringify(GOOD_PKG, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: good\n      name: good-pkg\n',
+  'lib/index.js': 'export const name = "good"\n',
+  'lib/client.js': 'const a = require("react")\nconst stale = require("@deepseek-ai/dsh-client-runtime")\nconsole.log(a, stale)\n',
+  'README.md': `# good-pkg\n\n${'A well-documented fixture plugin. '.repeat(20)}\n`,
+  'README.zh-CN.md': '# good-pkg\n\n中文文档。\n',
+  LICENSE: 'MIT License\n',
+  'docs/DESIGN.md': '# design\n',
+  'tests/good.test.mjs': 'import test from "node:test"\ntest("ok", () => {})\n',
+  '.github/workflows/ci.yml': 'name: ci\non: [push]\n',
+  'src/index.ts': 'export function apply(): void {\n  element.textContent = "safe"\n}\n',
+})
+const guardOkDir = join(fixtureRoot, 'guard-ok-plugin')
+writeTree(guardOkDir, {
+  'package.json': JSON.stringify(GOOD_PKG, null, 2),
+  'cordis.patch.yml': '- insert:\n    - id: good\n      name: good-pkg\n',
+  'lib/index.js': 'export const name = "good"\n',
+  'lib/client.js': 'const a = require("react")\nconst b = require("react/jsx-runtime")\nconsole.log(a, b)\n',
   'README.md': `# good-pkg\n\n${'A well-documented fixture plugin. '.repeat(20)}\n`,
   'README.zh-CN.md': '# good-pkg\n\n中文文档。\n',
   LICENSE: 'MIT License\n',
@@ -868,6 +928,82 @@ await check('mutation: uninstall of a bundle-layer plugin live-disables its load
   } finally {
     process.env.DSH_INSIGHTS_PROFILE_DIR = saved
   }
+})
+
+// ── shell module-table compat (升级预检) + uninstall reverse-dependency guard ─
+
+await check('shell: extractSeedWords parses the minified staticModules shape, rejects garbage', async () => {
+  const src = '!function(){function $z(){return{react:q5,"react/jsx-runtime":Y5,"@deepseek-ai/cordis":M5}};boot({staticModules:$z()})}()'
+  const words = extractSeedWords(src)
+  if (!words || words.join(',') !== 'react,react/jsx-runtime,@deepseek-ai/cordis') {
+    throw new Error(`words wrong: ${JSON.stringify(words)}`)
+  }
+  if (extractSeedWords('no shell here') !== null) throw new Error('garbage must yield null')
+  if (extractSeedWords('staticModules:zz()') !== null) throw new Error('call without def must yield null')
+})
+
+await check('shell: extractRequires collects literal requires (incl. __require), deduped', async () => {
+  const got = extractRequires('const a = require("react"); const b = __require("react/jsx-runtime"); const c = require("react"); const d = require(name); const e = require(`${spec}`)')
+  if (got.join(',') !== 'react,react/jsx-runtime') throw new Error(`requires wrong: ${JSON.stringify(got)}`)
+  if (extractRequires('export {}').length !== 0) throw new Error('empty expected')
+})
+
+await check('compat route: broken plugin flagged against the fixture shell', async () => {
+  const { status, body } = await getJson('/compat')
+  if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+  const compat = body.compat
+  if (compat.shell?.version !== '9.9.9-fixture') throw new Error(`shell wrong: ${JSON.stringify(compat.shell)}`)
+  if (!compat.shell.seedWords.includes('@deepseek-ai/dsh-client-store')) throw new Error('seed words missing')
+  const byName = Object.fromEntries(compat.rows.map((r) => [r.name, r]))
+  if (byName['dsh-alpha']?.status !== 'ok') throw new Error(`alpha should be ok: ${JSON.stringify(byName['dsh-alpha'])}`)
+  const beta = byName['dsh-beta']
+  if (beta?.status !== 'broken' || beta.missing.join(',') !== '@deepseek-ai/dsh-client-runtime/client') {
+    throw new Error(`beta should be broken on the stale require: ${JSON.stringify(beta)}`)
+  }
+  if (byName['plain-util']?.status !== 'no-client') throw new Error(`util should be no-client: ${JSON.stringify(byName['plain-util'])}`)
+  if (byName['dsh-disabled'] !== undefined) throw new Error('disabled plugins must be skipped')
+})
+
+await check('mutation: uninstall blocked while another installed plugin depends on it', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    const blocked = await postJson('/uninstall', { name: 'dsh-shared' }, MUTATE_HEADERS)
+    if (blocked.status !== 409 || blocked.body.error?.code !== 'has-dependents') {
+      throw new Error(`expected 409 has-dependents: ${blocked.status} ${JSON.stringify(blocked.body)}`)
+    }
+    if ((blocked.body.dependents ?? []).join(',') !== 'dsh-consumer') {
+      throw new Error(`dependents wrong: ${JSON.stringify(blocked.body)}`)
+    }
+    // the refused uninstall must not have touched the manifest
+    let manifest = readManifest(mutateFixture)
+    if (!('dsh-shared' in manifest.dependencies) || !manifest.dsh.profile.bundles.includes('dsh-shared')) {
+      throw new Error('refused uninstall must not touch the manifest')
+    }
+    // removing the dependent first unblocks the shared package
+    const first = await postJson('/uninstall', { name: 'dsh-consumer' }, MUTATE_HEADERS)
+    if (first.status !== 200 || first.body.ok !== true) throw new Error(`consumer uninstall: ${JSON.stringify(first.body)}`)
+    const second = await postJson('/uninstall', { name: 'dsh-shared' }, MUTATE_HEADERS)
+    if (second.status !== 200 || second.body.ok !== true) throw new Error(`shared uninstall after dependent removal: ${JSON.stringify(second.body)}`)
+    manifest = readManifest(mutateFixture)
+    if ('dsh-shared' in manifest.dependencies || 'dsh-consumer' in manifest.dependencies) throw new Error('deps not cleaned')
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('selfcheck: stale shell require scores compat.missing-seed (major, -10)', async () => {
+  const r = await runSelfcheck(guardDir)
+  const hit = r.drops.find((d) => d.code === 'compat.missing-seed')
+  if (!hit || hit.sev !== 'major') throw new Error(`drop missing: ${JSON.stringify(r.drops.map((d) => d.code))}`)
+  if (!hit.label.zh.includes('@deepseek-ai/dsh-client-runtime') || !hit.fix.zh) throw new Error('label/fix incomplete')
+  if (r.score !== 90) throw new Error(`score ${r.score}, want 90 (one major)`)
+})
+
+await check('selfcheck: a seed-only bundle stays clean', async () => {
+  const r = await runSelfcheck(guardOkDir)
+  if (r.drops.some((d) => d.code === 'compat.missing-seed')) throw new Error('false positive on a seed-only bundle')
+  if (r.hints.some((h) => h.code === 'compat.seed-unchecked')) throw new Error('seed table was locatable — no unchecked hint expected')
 })
 
 await check('moduleName -> npm name mapping (npm/scoped/subpath/path)', async () => {

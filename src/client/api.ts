@@ -126,10 +126,22 @@ export interface WireError {
 
 export class ApiError extends Error {
   readonly code: string
-  constructor(error: WireError) {
+  /** Uninstall blockers: installed packages declaring the target as a dependency. */
+  readonly dependents?: string[]
+  constructor(error: WireError, dependents?: string[]) {
     super(error.message)
     this.code = error.code
+    this.dependents = dependents
   }
+}
+
+/** The wire error from one response, with any structured extras attached. */
+function apiFailure(status: number, body: ({ ok?: boolean; error?: WireError } & Record<string, unknown>) | null): ApiError {
+  const error = body?.error ?? { code: 'http', message: `HTTP ${status}` }
+  const dependents = Array.isArray(body?.dependents)
+    ? body.dependents.filter((entry): entry is string => typeof entry === 'string')
+    : undefined
+  return new ApiError(error, dependents)
 }
 
 async function getJson<T>(query: string): Promise<T> {
@@ -149,8 +161,7 @@ async function getJson<T>(query: string): Promise<T> {
     // non-JSON body (e.g. the SPA fallback HTML) — treat as endpoint missing
   }
   if (!response.ok || body === null || body.ok !== true) {
-    const error = body?.error ?? { code: 'http', message: `HTTP ${response.status}` }
-    throw new ApiError(error)
+    throw apiFailure(response.status, body)
   }
   return body as unknown as T
 }
@@ -256,8 +267,7 @@ async function postOp(path: 'install' | 'uninstall', name: string): Promise<OpRe
     // non-JSON body — treat as endpoint missing
   }
   if (!response.ok || body === null || body.ok !== true) {
-    const error = body?.error ?? { code: 'http', message: `HTTP ${response.status}` }
-    throw new ApiError(error)
+    throw apiFailure(response.status, body)
   }
   return body as unknown as OpResult
 }
@@ -277,6 +287,27 @@ export async function fetchAudit(
   names: readonly string[],
 ): Promise<{ generatedAt: string | null; results: Record<string, PluginCard | null> }> {
   return getJson(`audit?npm=${encodeURIComponent(names.join(','))}`)
+}
+
+// ── client-bundle × shell module-table check (升级预检) ──────────────────────
+
+export interface ClientCompatRow {
+  name: string
+  /** 'broken' = the bundle requires modules the on-disk shell cannot resolve. */
+  status: 'ok' | 'broken' | 'unknown' | 'no-client'
+  requires: string[]
+  missing: string[]
+}
+
+export interface ClientCompatReport {
+  /** The on-disk shell (what the next `dsh web` boot loads); null = not locatable. */
+  shell: { version: string | null; seedWords: string[] } | null
+  rows: ClientCompatRow[]
+}
+
+/** Local pre-check against the shell's module table; absent on older hosts. */
+export async function fetchCompat(): Promise<{ compat: ClientCompatReport }> {
+  return getJson('compat')
 }
 
 /**

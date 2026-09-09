@@ -29,11 +29,17 @@
  *   version + plugin-flag per row, plus the in-box baseline count. Local
  *   filesystem only, no upstream fetch; never blocks on a Remote namespace.
  * - `GET /dsh-insights/health`    — liveness + per-document cache age.
+ * - `GET /dsh-insights/compat`    — client-bundle × shell module-table check:
+ *   every enabled plugin's require set against the on-disk shell's seed words
+ *   + graph rows (what the NEXT `dsh web` boot resolves), flagging plugins
+ *   that would crash the loader on the current/next dsh build.
  * - `POST /dsh-insights/install`   — one-click install into the active
  *   profile (`pnpm add` + append to `dsh.profile.bundles`), restricted to
  *   package names the corpus knows as plugins; body `{name}`.
  * - `POST /dsh-insights/uninstall` — drop from the bundles load list +
  *   `pnpm remove`, restricted to actually-installed names; body `{name}`.
+ *   Refuses (409 + `dependents`) while other installed packages declare the
+ *   target as a dependency.
  *
  * Mutations are guarded beyond the host-trust gate: POST only, a custom
  * `x-dsh-insights-kit: mutate` header is required (cross-origin pages cannot
@@ -62,7 +68,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanHotDir, disableEntry, hotMount, hotMountAvailable, hotUnmount, type HotContext, type LoaderLike } from './hot.ts'
 import { readInstalledInventory, resolveProfileDir } from './installed.ts'
-import { installPackage, isMutablePackage, pnpmAvailable, uninstallPackage, type OpKind } from './ops.ts'
+import { findDependents, installPackage, isMutablePackage, pnpmAvailable, uninstallPackage, type OpKind } from './ops.ts'
+import { checkClientCompat } from './shell.ts'
 import {
   UpstreamError,
   auditByNpm,
@@ -188,7 +195,7 @@ export function apply(raw: unknown): void {
     path: PREFIX,
     handler: (req, res) => void handleRequest(req, res, store, log, () => loaderRef, ctx),
   }))
-  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,health} + POST install/uninstall (hot-mount capable)')
+  log.info('registered GET /dsh-insights/{plugin,search,audit,scenarios,dynamics,runtime,installed,compat,health} + POST install/uninstall (hot-mount capable)')
 }
 
 // ── request handling ─────────────────────────────────────────────────────────
@@ -338,6 +345,14 @@ async function handleRequest(
       sendJson(res, 200, { ok: true, ...readInstalledInventory() })
       return
     }
+    if (pathname === `${PREFIX}/compat`) {
+      // Local-only: every enabled plugin's client-bundle requires vs the
+      // on-disk shell's module table (the next boot's resolvable set) — the
+      // "will it survive the running/next dsh build" pre-check. shell is null
+      // when the install tree cannot be located.
+      sendJson(res, 200, { ok: true, compat: checkClientCompat() })
+      return
+    }
     if (pathname === `${PREFIX}/health`) {
       sendJson(res, 200, {
         ok: true,
@@ -367,6 +382,7 @@ async function handleRequest(
           '/dsh-insights/dynamics',
           '/dsh-insights/runtime',
           '/dsh-insights/installed',
+          '/dsh-insights/compat',
           '/dsh-insights/health',
           'POST /dsh-insights/install',
           'POST /dsh-insights/uninstall',
@@ -501,6 +517,19 @@ async function handleMutation(
 
   if (!installed) {
     sendJson(res, 404, { ok: false, error: wireError('not-installed', `${name} is not installed in profile ${profile}`) })
+    return
+  }
+  // Reverse-dependency guard: removing a package other installed plugins
+  // declare as a dependency breaks THEM at the next boot (the shared-building
+  // -block crash class). Refuse and name the dependents; the user uninstalls
+  // those first.
+  const dependents = findDependents(dir, name)
+  if (dependents.length > 0) {
+    sendJson(res, 409, {
+      ok: false,
+      error: wireError('has-dependents', `${name} is a dependency of: ${dependents.join(', ')}`),
+      dependents,
+    })
     return
   }
   // Stop the live plugin first (hot mount dispose, else the bundle-layer

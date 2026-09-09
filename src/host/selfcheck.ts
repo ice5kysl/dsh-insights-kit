@@ -16,7 +16,12 @@
  * 4. checks npm consistency (published / latest vs local version / release
  *    recency) when a package name is declared — the registry base is
  *    injectable (`DSH_INSIGHTS_NPM_REGISTRY`) so tests never hit the network;
- * 5. returns score + grade (S≥95/A≥90/B≥75/C≥60/D), deductions with
+ * 5. guards shell seed drift: the built client bundle's external requires
+ *    must resolve against the current dsh shell's module table (seed words,
+ *    or the plugin's own graph row) — the 0.1.2-rc.1 crash class, caught at
+ *    author time when a dsh install tree is locatable (zero-weight hint
+ *    otherwise);
+ * 6. returns score + grade (S≥95/A≥90/B≥75/C≥60/D), deductions with
  *    per-code fix guidance, and the scan findings.
  *
  * The scan never influences the score — it is an informational surface for
@@ -28,6 +33,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { DropSeverity } from './drops.ts'
+import { extractRequires, readShellSeedLoose, stripClientSuffix } from './shell.ts'
 
 export const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org'
 
@@ -112,6 +118,7 @@ const FIX: Record<string, { zh: string; en: string }> = {
   'selfcheck.no-bundle-patch': { zh: '在 package.json 声明 dsh.bundle.patch 并提交对应的 cordis.patch.yml（否则无法以 bundle 形态安装）。', en: 'Declare dsh.bundle.patch in package.json and commit the cordis.patch.yml it points to (otherwise the bundle cannot install).' },
   'selfcheck.lib-missing': { zh: '先 npm run build 产出 lib/index.js + lib/client.js（发布产物）。', en: 'Run the build first so lib/index.js + lib/client.js exist (publish artifacts).' },
   'selfcheck.no-keywords': { zh: '在 package.json 加 keywords（含 dsh / deepseek-harness / cordis / plugin），代理 GitHub topics 的可发现性。', en: 'Add keywords to package.json (dsh / deepseek-harness / cordis / plugin) — the local proxy for GitHub-topic discoverability.' },
+  'compat.missing-seed': { zh: '删掉对失效模块的引用后重新构建客户端 bundle；外部 require 必须落在当前 shell 的 seed 表（react、cordis、dsh-client-store、ui-slots、ui-primitives 等）或插件自身包名上。', en: 'Drop references to the dead modules and rebuild the client bundle; external requires must land on the current shell seed table (react, cordis, dsh-client-store, ui-slots, ui-primitives, …) or the plugin\'s own package name.' },
 }
 
 /** health-v5 rules that need GitHub/git metadata — reported, never guessed. */
@@ -334,6 +341,41 @@ export async function runSelfcheck(rawDir: string, options: SelfcheckOptions = {
       zh: '未声明 engines.dsh——dsh 版本兼容无从判定；建议加 "engines": {"dsh": "^0.1.1"}（插件声明兼容的 dsh 版本范围；体检面板与 compat.json 会展示）。',
       en: 'engines.dsh is not declared — dsh compatibility cannot be determined; consider adding "engines": {"dsh": "^0.1.1"} (the dsh version range this plugin supports; the audit panel and compat.json display it).',
     })
+  }
+
+  // ── shell seed-drift guard (the 0.1.2-rc.1 lesson) ──
+  // The built client bundle's external requires must resolve against the
+  // current shell's module table; a stale one (e.g. a removed
+  // @deepseek-ai/dsh-client-runtime) kills the plugin at load. Checked only
+  // when a dsh install tree is locatable (CI without dsh gets a zero-weight
+  // hint instead of a guessed verdict). Cross-plugin requires are
+  // unverifiable here, so only the plugin's OWN name is accepted besides seed
+  // words — anything else scores as major, not fail, against false positives.
+  const clientBundlePath = join(dir, 'lib', 'client.js')
+  if (existsSync(clientBundlePath)) {
+    const requires = extractRequires(readFileSync(clientBundlePath, 'utf8'))
+    if (requires.length > 0) {
+      const seed = readShellSeedLoose()
+      if (seed === null) {
+        hints.push({
+          code: 'compat.seed-unchecked',
+          zh: `客户端 bundle 有 ${requires.length} 个外部 require（${requires.slice(0, 3).join(', ')}${requires.length > 3 ? '…' : ''}），但本机未找到 dsh 安装树，无法校验 shell 模块表兼容性；可在装有 dsh 的机器上重跑，或设 DSH_INSIGHTS_DSH_ROOT 指向安装根。`,
+          en: `The client bundle has ${requires.length} external require(s) (${requires.slice(0, 3).join(', ')}${requires.length > 3 ? '…' : ''}), but no dsh install tree was found to check shell module-table compatibility; re-run on a machine with dsh installed, or point DSH_INSIGHTS_DSH_ROOT at the install root.`,
+        })
+      } else {
+        const seedWords = new Set(seed.seedWords)
+        const ownName = typeof pkg.name === 'string' && pkg.name !== '' ? pkg.name : null
+        const missing = requires.filter((spec) => !seedWords.has(spec) && stripClientSuffix(spec) !== ownName)
+        if (missing.length > 0) {
+          drops.push(drop(
+            'compat.missing-seed',
+            'major',
+            `客户端 bundle 引用了当前 dsh（${seed.version ?? '未知版本'}）模块表无法解析的模块：${missing.join(', ')}（加载即失败，0.1.2-rc.1 事故同类）`,
+            `The client bundle requires modules the current dsh (${seed.version ?? 'unknown'}) module table cannot resolve: ${missing.join(', ')} (fails at load — the 0.1.2-rc.1 incident class)`,
+          ))
+        }
+      }
+    }
   }
 
   // ── docs ──

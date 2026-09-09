@@ -195,3 +195,41 @@ export async function uninstallPackage(profileDir: string, name: string, env?: N
   if (!remove.ok) return { ok: false, status: 'partial', detail: `disabled (removed from bundles) but pnpm remove failed: ${remove.detail}` }
   return { ok: true, status: 'done' }
 }
+
+/**
+ * Reverse-dependency guard for uninstall: which installed packages declare
+ * `target` in their dependencies/peerDependencies. Removing a shared building
+ * block (the cordis:include lesson) breaks every dependent at the next boot
+ * with the same "module table" crash class as a shell seed drift — the route
+ * refuses the uninstall while this list is non-empty.
+ */
+export function findDependents(profileDir: string, target: string): string[] {
+  const manifestPath = join(profileDir, 'package.json')
+  let manifest: Record<string, unknown>
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
+  } catch {
+    return []
+  }
+  const deps = manifest.dependencies
+  const names = typeof deps === 'object' && deps !== null && !Array.isArray(deps)
+    ? Object.keys(deps as Record<string, unknown>)
+    : []
+  const dependents: string[] = []
+  for (const name of names) {
+    if (name === target) continue
+    try {
+      const pkg = JSON.parse(readFileSync(join(profileDir, 'node_modules', name, 'package.json'), 'utf8')) as {
+        dependencies?: Record<string, unknown>
+        peerDependencies?: Record<string, unknown>
+      }
+      if ((pkg.dependencies !== undefined && target in pkg.dependencies)
+        || (pkg.peerDependencies !== undefined && target in pkg.peerDependencies)) {
+        dependents.push(name)
+      }
+    } catch {
+      // unreadable dependent manifest — cannot prove safety either way; skip
+    }
+  }
+  return dependents.sort()
+}

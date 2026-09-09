@@ -42,6 +42,7 @@ import {
   ApiError,
   classifyCheckInput,
   fetchAudit,
+  fetchCompat,
   fetchDynamics,
   fetchPlugin,
   fetchRuntime,
@@ -49,6 +50,8 @@ import {
   installPlugin,
   searchPlugins,
   uninstallPlugin,
+  type ClientCompatReport,
+  type ClientCompatRow,
   type DynamicsDoc,
   type DropSeverity,
   type PluginCard,
@@ -291,7 +294,15 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
       }
     } catch (error) {
       setState('error')
-      setMessage(error instanceof Error ? error.message : String(error))
+      if (error instanceof ApiError && error.code === 'has-dependents' && error.dependents && error.dependents.length > 0) {
+        setMessage(L(
+          '无法卸载：{names} 依赖它，请先卸载依赖方',
+          'Blocked: {names} depend on it — uninstall them first',
+          { names: error.dependents.join(', ') },
+        ))
+      } else {
+        setMessage(error instanceof Error ? error.message : String(error))
+      }
     }
   }
 
@@ -497,6 +508,11 @@ interface AuditState {
   dshVersion?: string | null
   /** The audit batch failed after the list rendered — pending rows stay. */
   auditFailed?: boolean
+  /**
+   * Shell module-table pre-check (null on older hosts / unlocatable shell):
+   * per-plugin client-bundle requires vs the on-disk shell's resolvable set.
+   */
+  compat?: ClientCompatReport | null
 }
 
 // ── per-version health-card cache (24h TTL) ──────────────────────────────────
@@ -533,6 +549,28 @@ function auditCacheWrite(name: string, version: string | null, card: PluginCard 
   }
 }
 
+/**
+ * Red「无法加载」mark for plugins whose client bundle requires modules the
+ * on-disk shell cannot resolve (the 0.1.2-rc.1 crash class) — visible before
+ * the restart that would otherwise fail with a console-only stack.
+ */
+function ShellCompatPill(props: { report: ClientCompatRow | undefined }): JSX.Element | null {
+  const { report } = props
+  if (!report || report.status !== 'broken') return null
+  return (
+    <span
+      style={{ background: '#dc2626', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
+      title={L(
+        '当前 dsh shell 的模块表已无法解析：{mods}。升级该插件到新构建，或先卸载/禁用，否则重启后它将加载失败。',
+        'The current dsh shell can no longer resolve: {mods}. Upgrade the plugin to a fresh build, or uninstall/disable it first — it will fail to load after restart.',
+        { mods: report.missing.join(', ') },
+      )}
+    >
+      {L('无法加载', 'won\u2019t load')}
+    </span>
+  )
+}
+
 function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Element {
   const { onPick } = props
   const [audit, setAudit] = useState<AuditState>({ form: 'loading' })
@@ -545,8 +583,9 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
     void (async () => {
       // dynamics feeds both forms (breaking card + dist-tags + latest
       // release); the runtime probe reports the running dsh version. Both
-      // tolerate failure so the audit list still renders.
-      const [dynamics, dshVersion, inventory] = await Promise.all([
+      // tolerate failure so the audit list still renders. The compat probe
+      // (older hosts 404 it → null) powers the「无法加载」pre-check marks.
+      const [dynamics, dshVersion, inventory, compat] = await Promise.all([
         fetchDynamics()
           .then((res) => res.dynamics)
           .catch(() => undefined),
@@ -554,6 +593,9 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
           .then((res) => res.dsh?.version ?? null)
           .catch(() => null),
         getInstalled(),
+        fetchCompat()
+          .then((res) => res.compat)
+          .catch(() => null),
       ])
       if (!inventory) {
         if (!cancelled) setAudit({ form: 'degraded', dynamics, dshVersion })
@@ -580,6 +622,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
         profile: inventory.profile,
         dynamics,
         dshVersion,
+        compat,
       })
       const pending = rows.filter((row) => row.card === undefined)
       if (pending.length === 0) return
@@ -654,10 +697,46 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
   }
   const unlisted = rows.filter((row) => row.card === null).length
   const profile = audit.profile ?? 'web'
+  const compatByName = new Map((audit.compat?.rows ?? []).map((row) => [row.name, row]))
+  const brokenCompat = (audit.compat?.rows ?? []).filter((row) => row.status === 'broken')
+  const shellVersion = audit.compat?.shell?.version ?? null
+  // On-disk shell newer than the running one = dsh was upgraded but `dsh web`
+  // not restarted yet — the exact pre-flight window this check exists for.
+  const upgradePending = shellVersion !== null && !!audit.dshVersion && shellVersion !== audit.dshVersion
 
   return (
     <div>
       <DshVersionLine version={audit.dshVersion} latest={latestRelease} />
+
+      {upgradePending && (
+        <div style={{ ...cardStyle, borderLeft: '3px solid #ca8a04' }}>
+          <div style={mutedStyle}>
+            {L(
+              '检测到磁盘上的 dsh 已是 {disk}（当前运行 {run}）——重启前请先看下方「无法加载」标注。',
+              'The on-disk dsh is already {disk} (running {run}) — check the「won\u2019t load」marks below before restarting.',
+              { disk: shellVersion, run: audit.dshVersion ?? '?' },
+            )}
+          </div>
+        </div>
+      )}
+
+      {brokenCompat.length > 0 && (
+        <div style={{ ...cardStyle, borderLeft: '3px solid #dc2626' }}>
+          <div style={{ fontWeight: 600, color: '#dc2626', marginBottom: 4 }}>
+            {L(
+              '{n} 个插件在当前 dsh 构建下无法加载',
+              '{n} plugin(s) cannot load on the current dsh build',
+              { n: brokenCompat.length },
+            )}
+          </div>
+          <div style={mutedStyle}>
+            {L(
+              '它们的界面包引用了 shell 模块表已移除的模块（行内红标有具体模块名）。这不是体检扣分项，是会直接加载失败的硬错误：升级插件到修复后的构建，或先卸载/禁用。',
+              'Their UI bundles require modules the shell module table no longer ships (the inline red mark names them). This is not a score deduction — it is a hard load failure: upgrade to a fixed build, or uninstall/disable first.',
+            )}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
         {GRADE_ORDER.map((grade) => (
@@ -718,6 +797,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                 <li key={row.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', flexWrap: 'wrap' }}>
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
+                  <ShellCompatPill report={compatByName.get(row.name)} />
                   <span style={mutedStyle}>{audit.auditFailed ? L('未体检', 'not audited') : L('体检中…', 'auditing…')}</span>
                 </li>
               )
@@ -728,6 +808,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   <GradeBadge grade={null} />
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
+                  <ShellCompatPill report={compatByName.get(row.name)} />
                   <span style={mutedStyle}>
                     {row.plugin
                       ? L('未收录（不在权威集）', 'unlisted (not in the corpus)')
@@ -753,6 +834,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   </button>
                   {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
+                  <ShellCompatPill report={compatByName.get(row.name)} />
                   <Stars n={card.stars} />
                   {drift && (
                     <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
