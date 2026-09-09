@@ -17,7 +17,7 @@
 
 ### 作者自检（CLI）
 
-面向插件作者，health-v5 规则书同时以 CLI 形态检查**本机插件目录**（[dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health) CLI 的 `--dir` 能力）：
+面向插件作者，health-v5 规则书同时以 CLI 形态检查**本机插件目录**：
 
 ```bash
 npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
