@@ -59,3 +59,15 @@ export function isOutdated(current: string, latest: string): boolean | null {
   if (!a || !b) return null
   return cmp(a, b) < 0
 }
+
+/**
+ * Compare two versions by base triple (prerelease dropped) — negative when
+ * a < b, 0 on equal bases, positive when a > b. Null when either is
+ * unparseable. Same conservative idiom as isOutdated.
+ */
+export function compareBaseVersions(a: string, b: string): number | null {
+  const ta = baseVersion(a)
+  const tb = baseVersion(b)
+  if (!ta || !tb) return null
+  return cmp(ta, tb)
+}

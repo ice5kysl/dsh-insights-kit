@@ -340,8 +340,12 @@ export async function fetchCompat(): Promise<{ compat: ClientCompatReport }> {
 
 export interface UpgradeCheckRow {
   name: string
-  /** Observed outcome at the latest matrix shell ('unknown' = untested). */
-  status: 'ok' | 'fail' | 'unknown'
+  /** Observed outcome at the latest matrix shell ('unknown' = untested;
+   *  'stale' = the matrix measured a different plugin version than the one
+   *  installed — no conclusion either way, never blocks an upgrade). */
+  status: 'ok' | 'fail' | 'unknown' | 'stale'
+  /** The plugin version the matrix actually measured (stale rows only). */
+  measuredVersion?: string
 }
 
 export interface UpgradeCheck {
@@ -349,7 +353,7 @@ export interface UpgradeCheck {
   available: boolean
   current: string | null
   latest: string | null
-  counts: { ok: number; fail: number; unknown: number; total: number }
+  counts: { ok: number; fail: number; unknown: number; stale?: number; total: number }
   rows: UpgradeCheckRow[]
   observedAt: string | null
 }

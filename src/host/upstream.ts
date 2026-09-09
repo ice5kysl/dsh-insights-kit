@@ -23,6 +23,7 @@
  */
 
 import { enrichDrops, type DropInfo } from './drops.ts'
+import { compareBaseVersions } from '../shared/compat.ts'
 
 export const DEFAULT_BASE_URL = 'https://dsh-insights.com/data'
 export const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000
@@ -186,6 +187,8 @@ export interface ObservedResult {
 export interface ObservedPlugin {
   /** verdict.cls passthrough ('ok' / 'never' / 'broken-since' / …), null when absent. */
   verdict: string | null
+  /** The plugin version the matrix actually measured (drives the stale guard). */
+  version: string | null
   /** shell version → observed outcome; sparse — absent versions mean untested. */
   results: Record<string, ObservedResult>
 }
@@ -218,8 +221,10 @@ export function observedByPkg(doc: unknown): Map<string, ObservedPlugin> {
       }
     }
     const cls = (row as { verdict?: { cls?: unknown } | null }).verdict?.cls
+    const version = (row as { version?: unknown }).version
     map.set(name.toLowerCase(), {
       verdict: typeof cls === 'string' && cls ? cls : null,
+      version: typeof version === 'string' && version ? version : null,
       results,
     })
   }
@@ -258,11 +263,13 @@ export function observedAtShell(entry: ObservedPlugin | undefined, shell: string
 
 // ── upgrade-check (实测矩阵 × 已装清单) ──────────────────────────────────────
 
-export type UpgradeRowStatus = 'ok' | 'fail' | 'unknown'
+export type UpgradeRowStatus = 'ok' | 'fail' | 'unknown' | 'stale'
 
 export interface UpgradeCheckRow {
   name: string
   status: UpgradeRowStatus
+  /** The plugin version the matrix actually measured (stale rows only). */
+  measuredVersion?: string
 }
 
 export interface UpgradeCheckResult {
@@ -270,62 +277,90 @@ export interface UpgradeCheckResult {
   available: boolean
   current: string | null
   latest: string | null
-  counts: { ok: number; fail: number; unknown: number; total: number }
+  counts: { ok: number; fail: number; unknown: number; stale: number; total: number }
   rows: UpgradeCheckRow[]
   /** compat-observed generatedAt (null when the doc is absent). */
   observedAt: string | null
 }
 
+/** Is `a` newer than `b` by base-version compare (prerelease dropped)? Null-safe. */
+function isNewerBase(a: string, b: string): boolean {
+  const order = compareBaseVersions(a, b)
+  return order !== null && order > 0
+}
+
 /**
- * The latest shell version worth comparing against: compat-observed's
- * shellDistTags.latest first (it is guaranteed to be in the matrix), the
- * dynamics.json dsh dist-tag latest as fallback. A candidate that is not in
- * the matrix's version list counts as unknown (the matrix predates it, so no
- * plugin has observed results there) and the next candidate is tried.
+ * The latest shell version worth comparing against: the NEWEST of
+ * compat-observed's shellDistTags.{latest,next} that is actually in the
+ * matrix — the official npm tag hygiene is poor (`latest` has pointed at an
+ * ancient build while `next` carried the current line), so neither tag is
+ * trusted on its own. The alpha line is deliberately excluded: it is not an
+ * upgrade recommendation. dynamics.json's dsh dist-tag latest stays as the
+ * fallback for upstreams without the matrix. A candidate not in the matrix's
+ * version list counts as unknown (the matrix predates it, so no plugin has
+ * observed results there).
  */
 function resolveObservedLatest(doc: unknown, dynamics: unknown): string | null {
   const versionsRaw = (doc as { allShellVersions?: unknown } | null)?.allShellVersions
   const matrix = Array.isArray(versionsRaw)
     ? versionsRaw.filter((v): v is string => typeof v === 'string' && v.length > 0)
     : []
-  const candidates: unknown[] = [
-    (doc as { shellDistTags?: { latest?: unknown } | null } | null)?.shellDistTags?.latest,
-    (dynamics as { dsh?: { npm?: { distTags?: { latest?: unknown } | null } | null } | null } | null)?.dsh?.npm?.distTags?.latest,
-  ]
-  for (const candidate of candidates) {
+  const tags = (doc as { shellDistTags?: { latest?: unknown; next?: unknown } | null } | null)?.shellDistTags
+  let best: string | null = null
+  for (const candidate of [tags?.latest, tags?.next]) {
     if (typeof candidate !== 'string' || !candidate) continue
     if (matrix.length > 0 && !matrix.includes(candidate)) continue
-    return candidate
+    if (best === null || isNewerBase(candidate, best)) best = candidate
+  }
+  if (best !== null) return best
+  const fallback = (dynamics as { dsh?: { npm?: { distTags?: { latest?: unknown } | null } | null } | null } | null)?.dsh?.npm?.distTags?.latest
+  if (typeof fallback === 'string' && fallback && (matrix.length === 0 || matrix.includes(fallback))) {
+    return fallback
   }
   return null
 }
 
 /**
  * Should-dsh-be-upgraded computation: each installed plugin's observed status
- * AT the latest shell version ('ok' / 'fail' / 'unknown' when the plugin or
- * the version is untested). Pure — current/latest/counts are reported, the
- * comparison verdict is the client's call (base-version compare). Not
- * available when the running version is unknown or no latest is known.
+ * AT the latest shell version:
+ *
+ * - 'ok' / 'fail' — the matrix's verdict at that shell;
+ * - 'stale'       — the matrix measured a DIFFERENT plugin version than the
+ *   one installed (the plugin was updated after the matrix run — the verdict
+ *   cannot be trusted either way, so it counts in neither ok nor fail);
+ * - 'unknown'     — the plugin or the shell version was never tested.
+ *
+ * Pure — current/latest/counts are reported, the comparison verdict is the
+ * client's call (base-version compare). Not available when the running
+ * version is unknown or no latest is known.
  */
 export function computeUpgradeCheck(
   doc: unknown,
   dynamics: unknown,
-  installed: readonly string[],
+  installed: ReadonlyArray<{ name: string; version: string | null }>,
   current: string | null,
 ): UpgradeCheckResult {
   const observed = observedByPkg(doc)
   const latest = resolveObservedLatest(doc, dynamics)
-  const counts = { ok: 0, fail: 0, unknown: 0, total: installed.length }
-  const rows: UpgradeCheckRow[] = installed.map((name) => {
+  const counts = { ok: 0, fail: 0, unknown: 0, stale: 0, total: installed.length }
+  const rows: UpgradeCheckRow[] = installed.map(({ name, version }) => {
     const entry = observed.get(name.toLowerCase())
     const result = latest !== null ? entry?.results[latest] : undefined
-    const status: UpgradeRowStatus = result === undefined
-      ? 'unknown'
-      : result.status === 'ok'
-        ? 'ok'
-        : 'fail'
+    let status: UpgradeRowStatus
+    let measuredVersion: string | undefined
+    if (entry === undefined || result === undefined) {
+      status = 'unknown'
+    } else if (entry.version !== null && version !== null && entry.version !== version) {
+      // Freshness guard: the matrix ran against another build of this plugin
+      // (the update-then-retest window) — no conclusion, report what was
+      // actually measured.
+      status = 'stale'
+      measuredVersion = entry.version
+    } else {
+      status = result.status === 'ok' ? 'ok' : 'fail'
+    }
     counts[status] += 1
-    return { name, status }
+    return { name, status, ...(measuredVersion !== undefined ? { measuredVersion } : {}) }
   })
   return {
     available: current !== null && latest !== null,

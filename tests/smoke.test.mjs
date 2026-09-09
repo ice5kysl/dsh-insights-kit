@@ -1225,9 +1225,11 @@ await check('observedByPkg indexes by lowercased npm name and tolerates malforme
   if (map.size !== 3) throw new Error(`size ${map.size}`)
   const alpha = map.get('dsh-alpha')
   if (alpha?.verdict !== 'ok' || alpha.results['0.1.2-rc.1']?.status !== 'ok') throw new Error(`alpha wrong: ${JSON.stringify(alpha)}`)
+  // The measured plugin version is captured for the stale guard.
+  if (alpha.version !== '1.0.0') throw new Error(`alpha version wrong: ${JSON.stringify(alpha)}`)
   const beta = map.get('dsh-beta')
   const missing = beta?.results['0.1.3-alpha.2']?.missing
-  if (beta?.verdict !== 'broken-since' || !Array.isArray(missing) || missing[0] !== '@deepseek-ai/dsh-client-runtime/client') {
+  if (beta?.verdict !== 'broken-since' || beta.version !== '2.0.0' || !Array.isArray(missing) || missing[0] !== '@deepseek-ai/dsh-client-runtime/client') {
     throw new Error(`beta wrong: ${JSON.stringify(beta)}`)
   }
   // Sparse results: only the tested shell versions are kept.
@@ -1266,25 +1268,99 @@ await check('observedAtShell maps ok/broken/untested to the wire tri-state', asy
   if (observedAtShell(undefined, '0.1.2-rc.1').atCurrentShell !== null) throw new Error('unknown plugin must be null')
 })
 
-await check('computeUpgradeCheck: latest from the matrix tag, per-plugin status at latest', async () => {
-  const res = computeUpgradeCheck(COMPAT_OBSERVED, DYNAMICS, ['dsh-alpha', 'dsh-beta', 'dsh-sparse', 'plain-util'], '0.1.1-rc.1')
+await check('computeUpgradeCheck: latest from the dirty dist-tags, per-plugin status at latest', async () => {
+  // Fixture tags mirror the real tag-hygiene mess: latest=0.1.1-rc.1
+  // (ancient), next=0.1.2-rc.1 (current line), alpha=0.1.3-alpha.2 (never a
+  // recommendation) — the winner must be next.
+  const res = computeUpgradeCheck(COMPAT_OBSERVED, DYNAMICS, [
+    { name: 'dsh-alpha', version: '1.0.0' },
+    { name: 'dsh-beta', version: '2.1.0' },
+    { name: 'dsh-sparse', version: '0.1.0' },
+    { name: 'plain-util', version: '3.2.1' },
+  ], '0.1.1-rc.1')
   if (res.available !== true || res.latest !== '0.1.2-rc.1' || res.current !== '0.1.1-rc.1') {
     throw new Error(`head wrong: ${JSON.stringify(res)}`)
   }
   if (res.observedAt !== '2026-09-08T00:00:00.000Z') throw new Error(`observedAt wrong: ${res.observedAt}`)
-  const byName = Object.fromEntries(res.rows.map((r) => [r.name, r.status]))
-  // alpha+beta are ok AT latest; sparse was only tested on 0.1.3-alpha.2;
-  // plain-util is not in the matrix at all.
-  if (byName['dsh-alpha'] !== 'ok' || byName['dsh-beta'] !== 'ok' || byName['dsh-sparse'] !== 'unknown' || byName['plain-util'] !== 'unknown') {
-    throw new Error(`rows wrong: ${JSON.stringify(byName)}`)
+  const byName = Object.fromEntries(res.rows.map((r) => [r.name, r]))
+  // alpha is ok AT latest (measured version matches); sparse was only tested
+  // on 0.1.3-alpha.2; plain-util is not in the matrix at all; beta was
+  // measured at 2.0.0 but 2.1.0 is installed → stale, not ok/fail.
+  if (byName['dsh-alpha']?.status !== 'ok') throw new Error(`alpha wrong: ${JSON.stringify(byName['dsh-alpha'])}`)
+  if (byName['dsh-beta']?.status !== 'stale' || byName['dsh-beta']?.measuredVersion !== '2.0.0') {
+    throw new Error(`beta should be stale with measuredVersion: ${JSON.stringify(byName['dsh-beta'])}`)
   }
-  const { ok, fail, unknown, total } = res.counts
-  if (ok !== 2 || fail !== 0 || unknown !== 2 || total !== 4) throw new Error(`counts wrong: ${JSON.stringify(res.counts)}`)
+  if (byName['dsh-sparse']?.status !== 'unknown' || byName['plain-util']?.status !== 'unknown') {
+    throw new Error(`unknown rows wrong: ${JSON.stringify(byName)}`)
+  }
+  const { ok, fail, unknown, stale, total } = res.counts
+  // Stale counts in neither ok nor fail — the go/no-go gate is fail-only.
+  if (ok !== 1 || fail !== 0 || unknown !== 2 || stale !== 1 || total !== 4) {
+    throw new Error(`counts wrong: ${JSON.stringify(res.counts)}`)
+  }
+})
+
+await check('computeUpgradeCheck: latest semantics — newest of latest/next in matrix, alpha excluded', async () => {
+  // next newer than latest: next wins.
+  const nextWins = computeUpgradeCheck(COMPAT_OBSERVED, null, [], '0.1.1-rc.1')
+  if (nextWins.latest !== '0.1.2-rc.1') throw new Error(`next should win: ${nextWins.latest}`)
+  // latest newer than next: latest wins (both in matrix).
+  const latestWins = computeUpgradeCheck({
+    ...COMPAT_OBSERVED,
+    shellDistTags: { latest: '0.1.2-rc.1', next: '0.1.1-rc.1' },
+  }, null, [], '0.1.1-rc.1')
+  if (latestWins.latest !== '0.1.2-rc.1') throw new Error(`latest should win: ${latestWins.latest}`)
+  // alpha is the newest tag value but is never picked.
+  const alphaIgnored = computeUpgradeCheck({
+    ...COMPAT_OBSERVED,
+    shellDistTags: { latest: '0.1.1-rc.1', next: '0.1.1-rc.1', alpha: '0.1.3-alpha.2' },
+  }, null, [], '0.1.0')
+  if (alphaIgnored.latest !== '0.1.1-rc.1') throw new Error(`alpha must be excluded: ${alphaIgnored.latest}`)
+  // A tag outside the matrix is skipped even when it is the newest.
+  const outside = computeUpgradeCheck({
+    ...COMPAT_OBSERVED,
+    shellDistTags: { latest: '9.9.9', next: '0.1.1-rc.1' },
+  }, null, [], '0.1.0')
+  if (outside.latest !== '0.1.1-rc.1') throw new Error(`out-of-matrix tag must be skipped: ${outside.latest}`)
+})
+
+await check('computeUpgradeCheck: stale guard — version mismatch is neither ok nor fail', async () => {
+  const doc = {
+    ...COMPAT_OBSERVED,
+    shellDistTags: { latest: '0.1.2-rc.1' },
+  }
+  const res = computeUpgradeCheck(doc, null, [
+    { name: 'dsh-alpha', version: '1.0.0' },   // matches measured → ok
+    { name: 'dsh-beta', version: '2.1.0' },    // measured 2.0.0 → stale
+  ], '0.1.2-rc.1')
+  const byName = Object.fromEntries(res.rows.map((r) => [r.name, r]))
+  if (byName['dsh-alpha']?.status !== 'ok') throw new Error(`alpha wrong: ${JSON.stringify(byName['dsh-alpha'])}`)
+  if (byName['dsh-beta']?.status !== 'stale' || byName['dsh-beta']?.measuredVersion !== '2.0.0') {
+    throw new Error(`beta stale wrong: ${JSON.stringify(byName['dsh-beta'])}`)
+  }
+  if (res.counts.ok !== 1 || res.counts.fail !== 0 || res.counts.stale !== 1) {
+    throw new Error(`stale must not count as ok/fail: ${JSON.stringify(res.counts)}`)
+  }
+  // Same-version installed reaches the real verdict (beta fails on the alpha
+  // line); a null installed version cannot prove staleness → matrix verdict.
+  const atAlpha = computeUpgradeCheck({ ...COMPAT_OBSERVED, shellDistTags: { latest: '0.1.3-alpha.2' } }, null, [
+    { name: 'dsh-beta', version: '2.0.0' },
+    { name: 'dsh-alpha', version: null },
+  ], '0.1.2-rc.1')
+  const byName2 = Object.fromEntries(atAlpha.rows.map((r) => [r.name, r.status]))
+  if (byName2['dsh-beta'] !== 'fail') throw new Error(`matching version must reach the verdict: ${JSON.stringify(byName2)}`)
+  if (byName2['dsh-alpha'] !== 'ok') throw new Error(`null version must fall through to the verdict: ${JSON.stringify(byName2)}`)
+  if (atAlpha.counts.fail !== 1 || atAlpha.counts.ok !== 1 || atAlpha.counts.stale !== 0) {
+    throw new Error(`counts wrong: ${JSON.stringify(atAlpha.counts)}`)
+  }
 })
 
 await check('computeUpgradeCheck: name join is case-insensitive, broken maps to fail', async () => {
   const atNext = { ...COMPAT_OBSERVED, shellDistTags: { latest: '0.1.3-alpha.2' } }
-  const res = computeUpgradeCheck(atNext, null, ['DSH-Alpha', 'dsh-beta'], '0.1.2-rc.1')
+  const res = computeUpgradeCheck(atNext, null, [
+    { name: 'DSH-Alpha', version: '1.0.0' },
+    { name: 'dsh-beta', version: '2.0.0' },
+  ], '0.1.2-rc.1')
   const byName = Object.fromEntries(res.rows.map((r) => [r.name, r.status]))
   if (res.latest !== '0.1.3-alpha.2' || byName['DSH-Alpha'] !== 'ok' || byName['dsh-beta'] !== 'fail') {
     throw new Error(`rows wrong: ${JSON.stringify(res)}`)
@@ -1293,48 +1369,56 @@ await check('computeUpgradeCheck: name join is case-insensitive, broken maps to 
 })
 
 await check('computeUpgradeCheck: degradation paths (no current / tag outside matrix / dynamics fallback)', async () => {
+  const alpha = [{ name: 'dsh-alpha', version: '1.0.0' }]
   // Unknown running version → unavailable, rows still computed.
-  const noCurrent = computeUpgradeCheck(COMPAT_OBSERVED, null, ['dsh-alpha'], null)
+  const noCurrent = computeUpgradeCheck(COMPAT_OBSERVED, null, alpha, null)
   if (noCurrent.available !== false || noCurrent.current !== null || noCurrent.latest !== '0.1.2-rc.1') {
     throw new Error(`no-current wrong: ${JSON.stringify(noCurrent)}`)
   }
-  // A dist-tag pointing outside the matrix is treated as unknown (the matrix
-  // predates it — nothing has observed results there).
-  const ahead = computeUpgradeCheck({ ...COMPAT_OBSERVED, shellDistTags: { latest: '9.9.9' } }, null, ['dsh-alpha'], '0.1.1-rc.1')
+  // Dist-tags pointing entirely outside the matrix are treated as unknown
+  // (the matrix predates them — nothing has observed results there).
+  const ahead = computeUpgradeCheck({ ...COMPAT_OBSERVED, shellDistTags: { latest: '9.9.9', next: '9.9.10' } }, null, alpha, '0.1.1-rc.1')
   if (ahead.available !== false || ahead.latest !== null) throw new Error(`ahead wrong: ${JSON.stringify(ahead)}`)
   // No compat-observed doc at all (old site) → dynamics dist-tag fallback;
   // every row is unknown without the matrix, observedAt null.
-  const legacy = computeUpgradeCheck(null, { dsh: { npm: { distTags: { latest: '0.1.3-alpha.2' } } } }, ['dsh-alpha'], '0.1.2-rc.1')
+  const legacy = computeUpgradeCheck(null, { dsh: { npm: { distTags: { latest: '0.1.3-alpha.2' } } } }, alpha, '0.1.2-rc.1')
   if (legacy.available !== true || legacy.latest !== '0.1.3-alpha.2' || legacy.observedAt !== null) {
     throw new Error(`legacy wrong: ${JSON.stringify(legacy)}`)
   }
-  if (legacy.rows[0]?.status !== 'unknown' || legacy.counts.unknown !== 1) {
+  if (legacy.rows[0]?.status !== 'unknown' || legacy.counts.unknown !== 1 || legacy.counts.stale !== 0) {
     throw new Error(`legacy rows wrong: ${JSON.stringify(legacy)}`)
   }
-  // Fallback latest outside the (present) matrix is likewise unknown.
-  const legacyAhead = computeUpgradeCheck(COMPAT_OBSERVED, { dsh: { npm: { distTags: { latest: '9.9.9' } } } }, ['dsh-alpha'], '0.1.2-rc.1')
-  // …compat-observed's own tag wins over the dynamics fallback.
+  // The matrix's own tags win over the dynamics fallback.
+  const legacyAhead = computeUpgradeCheck(COMPAT_OBSERVED, { dsh: { npm: { distTags: { latest: '9.9.9' } } } }, alpha, '0.1.2-rc.1')
   if (legacyAhead.latest !== '0.1.2-rc.1') throw new Error(`priority wrong: ${JSON.stringify(legacyAhead)}`)
 })
 
-await check('upgrade-check route: rows/counts/latest from the fixture matrix', async () => {
+await check('upgrade-check route: rows/counts/latest from the fixture matrix, stale guard on version mismatch', async () => {
   // dshVersion() is null in this dev checkout, so available tracks it; the
   // rows/counts/latest come from the fixture regardless. Enabled plugins of
   // profileFixture: dsh-alpha, dsh-beta, dsh-pending, plain-util,
   // dsh-bundle-only (dsh-disabled is out of the load list).
   const { status, body } = await getJson('/upgrade-check')
   if (status !== 200 || body.ok !== true) throw new Error(`status ${status}`)
+  // The dirty fixture tags (latest=0.1.1-rc.1 ancient, next=0.1.2-rc.1,
+  // alpha=0.1.3-alpha.2) must resolve to next.
   if (body.latest !== '0.1.2-rc.1') throw new Error(`latest wrong: ${JSON.stringify(body)}`)
   if (body.available !== (typeof body.current === 'string')) throw new Error(`available wrong: ${JSON.stringify(body)}`)
   if (body.observedAt !== '2026-09-08T00:00:00.000Z') throw new Error(`observedAt wrong: ${body.observedAt}`)
-  const byName = Object.fromEntries((body.rows ?? []).map((r) => [r.name, r.status]))
-  if (byName['dsh-alpha'] !== 'ok' || byName['dsh-beta'] !== 'ok') throw new Error(`rows wrong: ${JSON.stringify(byName)}`)
-  if (byName['dsh-pending'] !== 'unknown' || byName['plain-util'] !== 'unknown' || byName['dsh-bundle-only'] !== 'unknown') {
-    throw new Error(`unknown rows wrong: ${JSON.stringify(byName)}`)
+  const byName = Object.fromEntries((body.rows ?? []).map((r) => [r.name, r]))
+  if (byName['dsh-alpha']?.status !== 'ok') throw new Error(`alpha wrong: ${JSON.stringify(byName['dsh-alpha'])}`)
+  // beta is installed at 2.1.0 but the matrix measured 2.0.0 → stale.
+  if (byName['dsh-beta']?.status !== 'stale' || byName['dsh-beta']?.measuredVersion !== '2.0.0') {
+    throw new Error(`beta should be stale with measuredVersion: ${JSON.stringify(byName['dsh-beta'])}`)
+  }
+  for (const name of ['dsh-pending', 'plain-util', 'dsh-bundle-only']) {
+    if (byName[name]?.status !== 'unknown') throw new Error(`${name} should be unknown: ${JSON.stringify(byName[name])}`)
   }
   if ('dsh-disabled' in byName) throw new Error('disabled plugins must be excluded')
-  const { ok, fail, unknown, total } = body.counts ?? {}
-  if (ok !== 2 || fail !== 0 || unknown !== 3 || total !== 5) throw new Error(`counts wrong: ${JSON.stringify(body.counts)}`)
+  const { ok, fail, unknown, stale, total } = body.counts ?? {}
+  if (ok !== 1 || fail !== 0 || unknown !== 3 || stale !== 1 || total !== 5) {
+    throw new Error(`counts wrong: ${JSON.stringify(body.counts)}`)
+  }
 })
 
 await check('legacy upstream (no compat-observed.json): scenarios + upgrade-check degrade silently', async () => {

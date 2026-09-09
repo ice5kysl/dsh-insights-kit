@@ -557,6 +557,10 @@ function UpgradeBanner(): JSX.Element | null {
   const outdated = isOutdated(check.current, check.latest)
   if (outdated === null) return null
   const { ok, fail, unknown, total } = check.counts
+  // Stale = the matrix measured a different plugin version than the one
+  // installed (absent on pre-0.9.3 hosts) — no conclusion either way: it
+  // neither counts as compatible nor blocks an upgrade, same as unknown.
+  const stale = check.counts.stale ?? 0
   const failedNames = check.rows.filter((row) => row.status === 'fail').map((row) => row.name)
   if (!outdated) {
     return (
@@ -573,6 +577,7 @@ function UpgradeBanner(): JSX.Element | null {
               {L('、{n} 个加载失败', ', {n} failing to load', { n: fail })}
             </span>
           )}
+          {stale > 0 && L('、{n} 个刚更新待复测', ', {n} just updated, retest pending', { n: stale })}
         </div>
       </div>
     )
@@ -587,6 +592,7 @@ function UpgradeBanner(): JSX.Element | null {
             { lat: check.latest, total, ok },
           )}
           {unknown > 0 && L('、{n} 个未实测', ', {n} untested', { n: unknown })}
+          {stale > 0 && L('、{n} 个刚更新待复测', ', {n} just updated, retest pending', { n: stale })}
           {L('，可以升', ' — safe to upgrade')}
         </div>
       </div>

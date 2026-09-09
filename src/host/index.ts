@@ -36,10 +36,12 @@
  *   + graph rows (what the NEXT `dsh web` boot resolves), flagging plugins
  *   that would crash the loader on the current/next dsh build.
  * - `GET /dsh-insights/upgrade-check` — "should I upgrade dsh": the running
- *   version vs the latest shell in the observed compat matrix
+ *   version vs the newest of the observed matrix's latest/next shell tags
  *   (compat-observed.json, dynamics dist-tags as fallback), with every
- *   enabled installed plugin's observed load outcome at that latest version;
- *   `available:false` when the current version or a known latest is missing.
+ *   enabled installed plugin's observed load outcome at that shell; a plugin
+ *   whose installed version differs from the measured one is reported
+ *   'stale' (no conclusion); `available:false` when the current version or
+ *   a known latest is missing.
  * - `POST /dsh-insights/install`   — one-click install into the active
  *   profile (`pnpm add` + append to `dsh.profile.bundles`), restricted to
  *   package names the corpus knows as plugins; body `{name}`.
@@ -394,17 +396,20 @@ async function handleRequest(
       return
     }
     if (pathname === `${PREFIX}/upgrade-check`) {
-      // Local + upstream combined: the running dsh version vs the latest
+      // Local + upstream combined: the running dsh version vs the newest
       // shell in the observed compat matrix, with every enabled installed
-      // plugin's observed load outcome AT that latest version. Both upstream
-      // docs degrade to null on failure (older sites lack compat-observed
-      // entirely) — the answer then is available:false, never an error.
+      // plugin's observed load outcome AT that shell — plus a freshness
+      // guard: when the matrix measured a different plugin version than the
+      // one installed, the row is 'stale' (no conclusion either way). Both
+      // upstream docs degrade to null on failure (older sites lack
+      // compat-observed entirely) — the answer then is available:false,
+      // never an error.
       const inventory = readInstalledInventory()
       const observedDoc = await store.compatObserved().catch(() => null)
       const dynamicsDoc = await store.dynamics().catch(() => null)
       const installed = inventory.plugins
         .filter((plugin) => plugin.enabled)
-        .map((plugin) => plugin.name)
+        .map((plugin) => ({ name: plugin.name, version: plugin.version }))
       sendJson(res, 200, {
         ok: true,
         ...computeUpgradeCheck(observedDoc, dynamicsDoc, installed, dshVersion()),
