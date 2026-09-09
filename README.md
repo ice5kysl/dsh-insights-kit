@@ -17,7 +17,7 @@ This plugin brings the answer **inside dsh Web**: an always-visible ✦ button i
 
 ### Author self-check (CLI)
 
-For plugin authors, the health-v5 rulebook also runs as a CLI against a **local plugin directory** (the [dsh-plugin-health](https://github.com/ice5kysl/dsh-plugin-health) CLI's `--dir` capability):
+For plugin authors, the health-v5 rulebook also runs as a CLI against a **local plugin directory**:
 
 ```bash
 npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
