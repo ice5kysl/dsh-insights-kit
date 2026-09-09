@@ -468,12 +468,12 @@ function CompatLine({ compat, dshVersion }: { compat: PluginCompat | null | unde
   let text: string
   let verdictRange: string | null = null
   if (compat.enginesDsh) {
-    text = L('dsh 兼容：engines.dsh {range}', 'dsh compat: engines.dsh {range}', { range: compat.enginesDsh })
+    text = L('engines.dsh {range}', 'engines.dsh {range}', { range: compat.enginesDsh })
     verdictRange = compat.enginesDsh
   } else {
     const peer = compat.dshPeers.find((p) => p.name === '@deepseek-ai/cordis') ?? compat.dshPeers[0]
     if (!peer) return null
-    text = L('dsh 兼容：peer {name} {range}', 'dsh compat: peer {name} {range}', { name: peer.name, range: peer.range })
+    text = L('peer {name} {range}', 'peer {name} {range}', { name: peer.name.replace(/^@deepseek-ai\//, ''), range: peer.range })
   }
   const verdict = dshVersion && verdictRange ? satisfiesSimpleRange(dshVersion, verdictRange) : null
   return (
