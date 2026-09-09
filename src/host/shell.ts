@@ -339,7 +339,10 @@ export function checkClientCompat(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv,
 ): ClientCompatReport {
-  const shell = readShellSeed(env, argv)
+  // Loose resolution: identical inside the harness (the strict arm hits
+  // first), and additionally covers the doctor CLI's outside-the-harness
+  // context (well-known global install roots).
+  const shell = readShellSeedLoose(env, argv)
   if (shell === null) return { shell: null, rows: [] }
   const { dir } = resolveProfileDir(env, argv)
   const seed = new Set(shell.seedWords)

@@ -242,7 +242,7 @@ export interface OpResult {
 }
 
 /** POST one profile mutation with the anti-CSRF custom header. */
-async function postOp(path: 'install' | 'uninstall', name: string): Promise<OpResult> {
+async function postOp(path: 'install' | 'uninstall' | 'disable', name: string): Promise<OpResult> {
   let response: Response
   try {
     response = await fetch(`/dsh-insights/${path}`, {
@@ -280,6 +280,15 @@ export function installPlugin(name: string): Promise<OpResult> {
 /** One-click uninstall of an installed package from the active profile. */
 export function uninstallPlugin(name: string): Promise<OpResult> {
   return postOp('uninstall', name)
+}
+
+/**
+ * Quarantine an installed plugin: out of the load list, files kept — the
+ * crash-immunity escape hatch for「won't load」rows. Reversible via install
+ * (the host re-enables installed-but-disabled names without a pnpm run).
+ */
+export function disablePlugin(name: string): Promise<OpResult> {
+  return postOp('disable', name)
 }
 
 /** Batch health lookup by npm package names; unlisted names map to null. */

@@ -50,6 +50,7 @@ import {
   installPlugin,
   searchPlugins,
   uninstallPlugin,
+  disablePlugin,
   type ClientCompatReport,
   type ClientCompatRow,
   type DynamicsDoc,
@@ -278,6 +279,11 @@ function InstallActionButton(props: { pkgName: string; installed: boolean; profi
       if (result.note === 'already-installed') {
         setState('done')
         setMessage(L('已安装，无需重复操作', 'Already installed'))
+      } else if (result.note === 're-enabled') {
+        setState('done')
+        setMessage(result.hot === true
+          ? L('已恢复启用并即时激活 ✓ 刷新页面即可使用', 'Re-enabled & activated ✓ refresh the page to use it')
+          : L('已恢复启用 ✓ 重启 dsh web 后生效', 'Re-enabled ✓ restart `dsh web` to take effect'))
       } else if (result.hot === true) {
         setState('done')
         setMessage(installed
@@ -571,12 +577,77 @@ function ShellCompatPill(props: { report: ClientCompatRow | undefined }): JSX.El
   )
 }
 
+/**
+ * Quarantine action for「won't load」rows: drops the plugin from the load
+ * list (files kept) so the next `dsh web` boot cannot be broken by it.
+ * Renders nothing while the mutation surface is unavailable.
+ */
+function DisableButton(props: { pkgName: string }): JSX.Element | null {
+  const { pkgName } = props
+  const [canMutate, setCanMutate] = useState<boolean | null>(null)
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle')
+  const [message, setMessage] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    void mutationsAvailable().then((available) => {
+      if (!cancelled) setCanMutate(available)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  if (canMutate !== true) return null
+  if (state === 'done') {
+    return <span style={{ ...mutedStyle, color: '#16a34a' }}>{L('已禁用 ✓', 'Disabled ✓')}</span>
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <button
+        style={copyButtonStyle}
+        disabled={state === 'busy'}
+        title={L('移出装载清单（文件保留）：重启后不再加载，随时可重新启用', 'Out of the load list (files kept): not loaded after restart, re-enable any time')}
+        onClick={(event) => {
+          event.stopPropagation()
+          setState('busy')
+          disablePlugin(pkgName)
+            .then(() => {
+              invalidateInstalled()
+              setState('done')
+            })
+            .catch((error: unknown) => {
+              setState('error')
+              setMessage(error instanceof Error ? error.message : String(error))
+            })
+        }}
+      >
+        {state === 'busy' ? L('禁用中…', 'Disabling…') : L('禁用', 'Disable')}
+      </button>
+      {state === 'error' && (
+        <span style={{ ...mutedStyle, color: '#dc2626' }} title={message}>{L('失败', 'Failed')}</span>
+      )}
+    </span>
+  )
+}
+
 function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Element {
   const { onPick } = props
   const [audit, setAudit] = useState<AuditState>({ form: 'loading' })
   // Bumps when a one-click install/uninstall lands elsewhere in the panel:
   // re-read the (invalidated) inventory and re-render the list.
   const epoch = useInstalledEpoch()
+  // Quarantine-all (broken plugins → disable) action state.
+  const [quarantine, setQuarantine] = useState<'idle' | 'busy' | 'done'>('idle')
+  const [quarantineFailed, setQuarantineFailed] = useState<string[]>([])
+  const [canMutate, setCanMutate] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void mutationsAvailable().then((available) => {
+      if (!cancelled) setCanMutate(available)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -735,6 +806,40 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
               'Their UI bundles require modules the shell module table no longer ships (the inline red mark names them). This is not a score deduction — it is a hard load failure: upgrade to a fixed build, or uninstall/disable first.',
             )}
           </div>
+          {canMutate && (
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                style={copyButtonStyle}
+                disabled={quarantine === 'busy'}
+                title={L('把上述插件全部移出装载清单（文件保留，随时可恢复），让 dsh 安全重启', 'Drop all of the above from the load list (files kept, reversible) so dsh can restart safely')}
+                onClick={() => {
+                  setQuarantine('busy')
+                  void (async () => {
+                    const failed: string[] = []
+                    for (const row of brokenCompat) {
+                      try {
+                        await disablePlugin(row.name)
+                      } catch {
+                        failed.push(row.name)
+                      }
+                    }
+                    setQuarantineFailed(failed)
+                    setQuarantine('done')
+                    invalidateInstalled()
+                  })()
+                }}
+              >
+                {quarantine === 'busy' ? L('隔离中…', 'Quarantining…') : L('一键隔离（全部禁用，可恢复）', 'Quarantine all (disable, reversible)')}
+              </button>
+              {quarantine === 'done' && (
+                <span style={{ ...mutedStyle, color: quarantineFailed.length > 0 ? '#dc2626' : '#16a34a' }}>
+                  {quarantineFailed.length === 0
+                    ? L('已全部禁用 ✓ 现在重启 dsh web 即可安全启动', 'All disabled ✓ `dsh web` can now restart safely')
+                    : L('部分失败：{names}', 'Failed: {names}', { names: quarantineFailed.join(', ') })}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -798,6 +903,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
+                  {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
                   <span style={mutedStyle}>{audit.auditFailed ? L('未体检', 'not audited') : L('体检中…', 'auditing…')}</span>
                 </li>
               )
@@ -809,6 +915,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   <code style={{ fontWeight: 600 }}>{row.name}</code>
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
+                  {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
                   <span style={mutedStyle}>
                     {row.plugin
                       ? L('未收录（不在权威集）', 'unlisted (not in the corpus)')
@@ -835,6 +942,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   {card.score !== null && <span style={mutedStyle}>{card.score}</span>}
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
+                  {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
                   <Stars n={card.stars} />
                   {drift && (
                     <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}

@@ -40,6 +40,11 @@
  *   `pnpm remove`, restricted to actually-installed names; body `{name}`.
  *   Refuses (409 + `dependents`) while other installed packages declare the
  *   target as a dependency.
+ * - `POST /dsh-insights/disable` — quarantine: out of the load list, files
+ *   kept (the crash-immunity escape hatch for a plugin that would break the
+ *   next boot; the same dependents guard applies). Re-enabling is
+ *   `POST /install` on an installed-but-disabled name (bundles append +
+ *   hot mount, no pnpm run; response note `re-enabled`).
  *
  * Mutations are guarded beyond the host-trust gate: POST only, a custom
  * `x-dsh-insights-kit: mutate` header is required (cross-origin pages cannot
@@ -68,7 +73,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanHotDir, disableEntry, hotMount, hotMountAvailable, hotUnmount, type HotContext, type LoaderLike } from './hot.ts'
 import { readInstalledInventory, resolveProfileDir } from './installed.ts'
-import { findDependents, installPackage, isMutablePackage, pnpmAvailable, uninstallPackage, type OpKind } from './ops.ts'
+import { editBundles, findDependents, installPackage, isMutablePackage, pnpmAvailable, readBundlesShape, uninstallPackage, type OpKind } from './ops.ts'
 import { checkClientCompat } from './shell.ts'
 import {
   UpstreamError,
@@ -218,11 +223,13 @@ async function handleRequest(
     ? 'install'
     : pathname === `${PREFIX}/uninstall`
       ? 'uninstall'
-      : null
+      : pathname === `${PREFIX}/disable`
+        ? 'disable'
+        : null
   if (mutationOp !== null ? req.method !== 'POST' : req.method !== 'GET') {
     sendJson(res, 405, {
       ok: false,
-      error: wireError('method-not-allowed', mutationOp !== null ? 'POST only for install/uninstall' : 'only GET is served here'),
+      error: wireError('method-not-allowed', mutationOp !== null ? 'POST only for install/uninstall/disable' : 'only GET is served here'),
     })
     return
   }
@@ -386,6 +393,7 @@ async function handleRequest(
           '/dsh-insights/health',
           'POST /dsh-insights/install',
           'POST /dsh-insights/uninstall',
+          'POST /dsh-insights/disable',
         ],
       })
       return
@@ -479,11 +487,33 @@ async function handleMutation(
     return
   }
   const inventory = readInstalledInventory()
-  const installed = inventory.plugins.some((plugin) => plugin.name.toLowerCase() === name.toLowerCase())
+  const row = inventory.plugins.find((plugin) => plugin.name.toLowerCase() === name.toLowerCase())
+  const installed = row !== undefined
 
   if (op === 'install') {
-    if (installed) {
+    if (row?.enabled === true) {
       sendJson(res, 200, { ok: true, name, op, status: 'done', note: 'already-installed', restartRequired: false })
+      return
+    }
+    if (row !== undefined && row.version !== null) {
+      // Installed but disabled (out of the bundles load list, files on disk):
+      // re-enable = bundles append + hot mount, no pnpm run. (A null version
+      // means declared-but-not-materialized — falls through to full install.)
+      if (!editBundles(dir, row.name, 'add')) {
+        sendJson(res, 500, { ok: false, name, op, status: 'failed', detail: 'failed to edit dsh.profile.bundles', restartRequired: false })
+        return
+      }
+      const hot = await hotMount(hotCtx, dir, row.name)
+      sendJson(res, 200, {
+        ok: true,
+        name,
+        op,
+        status: 'done',
+        note: 're-enabled',
+        hot: hot.ok,
+        detail: hot.reason ?? undefined,
+        restartRequired: !hot.ok,
+      })
       return
     }
     // Scope installs to plugin packages the corpus knows — the buttons exist
@@ -512,6 +542,47 @@ async function handleMutation(
       detail: hot.reason ?? undefined,
       restartRequired: !hot.ok,
     })
+    return
+  }
+
+  if (op === 'disable') {
+    // Quarantine a broken/misbehaving plugin: out of the load list, files
+    // kept — the crash-immunity escape hatch that keeps dsh bootable.
+    if (!installed) {
+      sendJson(res, 404, { ok: false, error: wireError('not-installed', `${name} is not installed in profile ${profile}`) })
+      return
+    }
+    if (row?.enabled === false) {
+      sendJson(res, 200, { ok: true, name, op, status: 'done', note: 'already-disabled', restartRequired: false })
+      return
+    }
+    const shape = readBundlesShape(dir)
+    if (shape !== 'list') {
+      sendJson(res, 400, {
+        ok: false,
+        error: wireError('unsupported-profile', shape === 'all'
+          ? `profile ${profile} has no dsh.profile.bundles list — single-plugin disable is not expressible (every dependency loads)`
+          : `profile ${profile} manifest unreadable`),
+      })
+      return
+    }
+    // Same reverse-dependency guard as uninstall: a disabled dependency is an
+    // UNLOADED dependency — dependents crash at the next boot identically.
+    const dependents = findDependents(dir, name)
+    if (dependents.length > 0) {
+      sendJson(res, 409, {
+        ok: false,
+        error: wireError('has-dependents', `${name} is a dependency of: ${dependents.join(', ')}`),
+        dependents,
+      })
+      return
+    }
+    const liveOff = await hotUnmount(name) || await disableEntry(getLoader(), name)
+    if (!editBundles(dir, name, 'remove')) {
+      sendJson(res, 500, { ok: false, name, op, status: 'failed', detail: 'failed to edit dsh.profile.bundles', restartRequired: false })
+      return
+    }
+    sendJson(res, 200, { ok: true, name, op, status: 'done', hot: liveOff, restartRequired: !liveOff })
     return
   }
 

@@ -345,6 +345,9 @@ writeTree(mutateFixture, {
   }, null, 2),
   'node_modules/dsh-shared/package.json': JSON.stringify({ name: 'dsh-shared', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
   'node_modules/dsh-consumer/package.json': JSON.stringify({ name: 'dsh-consumer', version: '2.0.0', dependencies: { 'dsh-shared': '^1.0.0' }, dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+  // Pre-materialized dsh-alpha: the disable→re-enable path needs a version
+  // readable from disk (files stay put across a disable, unlike an uninstall).
+  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
   // Pre-materialized package tree for the hot-mountable fixture plugin: the
   // stub pnpm only edits the manifest, so the patch + pkg.json the hot mount
   // reads must already exist.
@@ -405,6 +408,33 @@ writeTree(dshRoot, {
   'node_modules/@deepseek-ai/dsh-client-ui-foo/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-client-ui-foo', version: '9.9.9-fixture', dsh: { client: { platform: 'web' } } }),
 })
 process.env.DSH_INSIGHTS_DSH_ROOT = dshRoot
+
+// 'all'-shape profile (no dsh.profile.bundles field — every dependency
+// loads): install must NOT conjure a bundles list (that would flip the shape
+// and unload everything else); disable is not expressible there.
+const allShapeFixture = join(fixtureRoot, 'profile-all-shape')
+writeTree(allShapeFixture, {
+  'package.json': JSON.stringify({
+    name: 'dsh-profile-all',
+    dependencies: { '@deepseek-ai/dsh-base': '0.1.2-rc.1', 'dsh-alpha': '^1.0.0' },
+  }, null, 2),
+  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+})
+
+// doctor fixture: own copy of the broken-plugin profile so --fix mutations
+// never disturb the shared route fixtures.
+const doctorFixture = join(fixtureRoot, 'profile-doctor')
+writeTree(doctorFixture, {
+  'package.json': JSON.stringify({
+    name: 'dsh-profile-doctor',
+    dependencies: { 'dsh-alpha': '^1.0.0', 'dsh-beta': '^2.1.0' },
+    dsh: { profile: { bundles: ['dsh-alpha', 'dsh-beta'] } },
+  }, null, 2),
+  'node_modules/dsh-alpha/package.json': JSON.stringify({ name: 'dsh-alpha', version: '1.0.0', dsh: { client: { platform: 'web' } } }),
+  'node_modules/dsh-alpha/lib/client.js': 'const a = require("react")\nconsole.log(a)\n',
+  'node_modules/dsh-beta/package.json': JSON.stringify({ name: 'dsh-beta', version: '2.1.0', dsh: { client: { platform: 'web' } } }),
+  'node_modules/dsh-beta/lib/client.js': 'const stale = require("@deepseek-ai/dsh-client-runtime/client")\nconsole.log(stale)\n',
+})
 
 // Identical to good-plugin but without engines.dsh — isolates the zero-weight
 // hint: the score must stay 100/S and the CLI exit code 0.
@@ -964,6 +994,64 @@ await check('compat route: broken plugin flagged against the fixture shell', asy
   if (byName['dsh-disabled'] !== undefined) throw new Error('disabled plugins must be skipped')
 })
 
+await check('mutation: disable is likewise blocked by dependents (409)', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    const blocked = await postJson('/disable', { name: 'dsh-shared' }, MUTATE_HEADERS)
+    if (blocked.status !== 409 || blocked.body.error?.code !== 'has-dependents') {
+      throw new Error(`expected 409 has-dependents: ${blocked.status} ${JSON.stringify(blocked.body)}`)
+    }
+    const manifest = readManifest(mutateFixture)
+    if (!manifest.dsh.profile.bundles.includes('dsh-shared')) throw new Error('refused disable must not touch the bundles list')
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('mutation: disable quarantines (deps kept, bundles dropped); install re-enables without pnpm', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
+  try {
+    const add = await postJson('/install', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (add.status !== 200) throw new Error(`install: ${JSON.stringify(add.body)}`)
+    const dis = await postJson('/disable', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (dis.status !== 200 || dis.body.ok !== true) throw new Error(`disable: ${JSON.stringify(dis.body)}`)
+    let manifest = readManifest(mutateFixture)
+    if (!('dsh-alpha' in manifest.dependencies)) throw new Error('disable must KEEP the dependency')
+    if (manifest.dsh.profile.bundles.includes('dsh-alpha')) throw new Error('disable must drop the bundles row')
+    const again = await postJson('/disable', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (again.body.note !== 'already-disabled') throw new Error(`re-disable should noop: ${JSON.stringify(again.body)}`)
+    // re-enable: the files never left, so install takes the bundles-only path
+    const re = await postJson('/install', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (re.status !== 200 || re.body.note !== 're-enabled') throw new Error(`re-enable: ${JSON.stringify(re.body)}`)
+    manifest = readManifest(mutateFixture)
+    if (!manifest.dsh.profile.bundles.includes('dsh-alpha')) throw new Error('re-enable must restore the bundles row')
+    const gone = await postJson('/uninstall', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (gone.status !== 200) throw new Error(`cleanup uninstall: ${JSON.stringify(gone.body)}`)
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
+await check('mutation: all-shape profile — install never conjures a bundles list, disable refused', async () => {
+  const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
+  process.env.DSH_INSIGHTS_PROFILE_DIR = allShapeFixture
+  try {
+    const add = await postJson('/install', { name: 'dsh-beta' }, MUTATE_HEADERS)
+    if (add.status !== 200 || add.body.ok !== true) throw new Error(`install: ${JSON.stringify(add.body)}`)
+    const manifest = readManifest(allShapeFixture)
+    if (!('dsh-beta' in manifest.dependencies)) throw new Error('deps not updated')
+    if (manifest.dsh !== undefined) throw new Error('install must NOT create dsh.profile.bundles on an all-shape profile')
+    const dis = await postJson('/disable', { name: 'dsh-alpha' }, MUTATE_HEADERS)
+    if (dis.status !== 400 || dis.body.error?.code !== 'unsupported-profile') {
+      throw new Error(`disable on all-shape should 400: ${dis.status} ${JSON.stringify(dis.body)}`)
+    }
+  } finally {
+    process.env.DSH_INSIGHTS_PROFILE_DIR = saved
+  }
+})
+
 await check('mutation: uninstall blocked while another installed plugin depends on it', async () => {
   const saved = process.env.DSH_INSIGHTS_PROFILE_DIR
   process.env.DSH_INSIGHTS_PROFILE_DIR = mutateFixture
@@ -1192,9 +1280,9 @@ if (!existsSync(cliPath)) {
   execFileSync(process.execPath, [join(rootDir, 'scripts/build.mjs')], { cwd: rootDir, stdio: 'inherit' })
 }
 
-function runCli(args) {
+function runCli(args, env = {}) {
   try {
-    const stdout = execFileSync(process.execPath, [cliPath, ...args], { encoding: 'utf8' })
+    const stdout = execFileSync(process.execPath, [cliPath, ...args], { encoding: 'utf8', env: { ...process.env, ...env } })
     return { code: 0, out: stdout }
   } catch (error) {
     return { code: error.status ?? -1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
@@ -1240,6 +1328,30 @@ await check('cli: relative path exits 2 with a friendly error', async () => {
 await check('cli: --help prints usage and exits 0', async () => {
   const { code, out } = runCli(['--help'])
   if (code !== 0 || !out.includes('selfcheck <dir>')) throw new Error(`exit ${code}`)
+})
+
+await check('cli: doctor reports the broken plugin and exits 1 (no --fix)', async () => {
+  const { code, out } = runCli(['doctor'], { DSH_INSIGHTS_PROFILE_DIR: doctorFixture })
+  if (code !== 1) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
+  if (!out.includes('dsh-beta') || !out.includes('@deepseek-ai/dsh-client-runtime/client')) {
+    throw new Error(`broken row missing: ${out.slice(0, 300)}`)
+  }
+  if (!out.includes('9.9.9-fixture')) throw new Error(`shell version missing: ${out.slice(0, 200)}`)
+  // no --fix → the manifest must be untouched
+  const manifest = readManifest(doctorFixture)
+  if (!manifest.dsh.profile.bundles.includes('dsh-beta')) throw new Error('doctor without --fix must not mutate')
+})
+
+await check('cli: doctor --fix disables exactly the broken plugin, exit 0', async () => {
+  const { code, out } = runCli(['doctor', '--fix'], { DSH_INSIGHTS_PROFILE_DIR: doctorFixture })
+  if (code !== 0) throw new Error(`exit ${code}: ${out.slice(0, 300)}`)
+  const manifest = readManifest(doctorFixture)
+  if (manifest.dsh.profile.bundles.includes('dsh-beta')) throw new Error('--fix must drop the broken plugin from bundles')
+  if (!('dsh-beta' in manifest.dependencies)) throw new Error('--fix must KEEP the dependency (files preserved)')
+  if (!manifest.dsh.profile.bundles.includes('dsh-alpha')) throw new Error('healthy plugins must stay loaded')
+  // second run: nothing broken left → clean exit 0
+  const again = runCli(['doctor'], { DSH_INSIGHTS_PROFILE_DIR: doctorFixture })
+  if (again.code !== 0) throw new Error(`post-fix run should be clean: ${again.out.slice(0, 200)}`)
 })
 
 /** Raw HTTP GET with an explicit Host header (undici fetch forbids it). */

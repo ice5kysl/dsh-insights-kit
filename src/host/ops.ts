@@ -28,7 +28,7 @@ import { homedir } from 'node:os'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export type OpKind = 'install' | 'uninstall'
+export type OpKind = 'install' | 'uninstall' | 'disable'
 
 export interface OpResult {
   ok: boolean
@@ -54,6 +54,31 @@ const INBOX_BUNDLES = new Set([
 /** Whether one name may EVER be mutated through this surface. */
 export function isMutablePackage(name: string): boolean {
   return isValidPackageName(name) && !INBOX_BUNDLES.has(name) && !name.startsWith('@deepseek-ai/')
+}
+
+/**
+ * The profile's load-list shape: 'list' = `dsh.profile.bundles` is an array
+ * (only those load); 'all' = no bundles field (every dependency loads);
+ * null = manifest unreadable. Matters because WRITING a bundles array into an
+ * 'all'-shape profile silently flips it to 'list' (everything else stops
+ * loading) — callers must skip the edit on 'all' (install: nothing to do) or
+ * refuse it (disable: not expressible).
+ */
+export function readBundlesShape(profileDir: string): 'list' | 'all' | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const dsh = (parsed as Record<string, unknown>).dsh
+    const profile = typeof dsh === 'object' && dsh !== null && !Array.isArray(dsh)
+      ? (dsh as Record<string, unknown>).profile
+      : undefined
+    const bundles = typeof profile === 'object' && profile !== null && !Array.isArray(profile)
+      ? (profile as Record<string, unknown>).bundles
+      : undefined
+    return Array.isArray(bundles) ? 'list' : 'all'
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -171,12 +196,16 @@ export function runPnpm(
  * `dependencies`), then the bundles append (we own the load list). A failed
  * bundles append after a successful add is rolled back with pnpm remove so
  * the profile never carries an installed-but-unlisted package nobody asked
- * for silently.
+ * for silently. On 'all'-shape profiles (no bundles field = every dependency
+ * loads) the bundles edit is skipped outright — writing a list there would
+ * flip the shape and unload everything else.
  */
 export async function installPackage(profileDir: string, name: string, env?: NodeJS.ProcessEnv): Promise<OpResult> {
   const add = await runPnpm(profileDir, ['add', name], env)
   if (!add.ok) return add
-  if (!editBundles(profileDir, name, 'add')) {
+  const shape = readBundlesShape(profileDir)
+  if (shape === 'all') return { ok: true, status: 'done' }
+  if (shape === null || !editBundles(profileDir, name, 'add')) {
     await runPnpm(profileDir, ['remove', name], env)
     return { ok: false, status: 'failed', detail: 'installed by pnpm but failed to append dsh.profile.bundles (rolled back)' }
   }

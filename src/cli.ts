@@ -2,26 +2,39 @@
 /**
  * dsh-insights-kit CLI (`dsh-insights-kit`).
  *
- * Currently one command, for plugin authors before publish:
+ * Two commands:
  *
  *   dsh-insights-kit selfcheck <dir> [--json] [--lang zh|en]
+ *   dsh-insights-kit doctor [--fix] [--profile <name>] [--json] [--lang zh|en]
  *
- * Scores a local plugin directory on the spot with the health-v5 rulebook
- * (src/host/selfcheck.ts — manifest/docs/repo/engineering/npm consistency,
- * plus the read-only surface scan). Text output groups deductions by rule
- * category with per-code fix guidance; `--json` prints the full report.
+ * `selfcheck` scores a local plugin directory on the spot with the health-v5
+ * rulebook (src/host/selfcheck.ts — manifest/docs/repo/engineering/npm
+ * consistency, the read-only surface scan, and the shell seed-drift guard).
+ * Text output groups deductions by rule category with per-code fix guidance;
+ * `--json` prints the full report.
  *
- * Exit codes: 0 = no fail-tier deduction, 1 = at least one fail-tier
- * deduction (usable as a CI pre-publish gate), 2 = usage error or invalid
- * directory (SelfcheckError).
+ * `doctor` is the crash-recovery tool for the boot-failure class where a
+ * plugin's client bundle requires modules the CURRENT dsh shell can no longer
+ * resolve (the 0.1.2-rc.1 incident): it works fully offline against the
+ * on-disk shell + profile manifest — precisely when `dsh web` itself will not
+ * boot. Without flags it reports which installed plugins would fail to load;
+ * `--fix` disables exactly those (out of the bundles load list, files kept,
+ * re-enable any time) so dsh starts again.
  *
- * The npm consistency check honors DSH_INSIGHTS_NPM_REGISTRY (tests point it
- * at a fake registry).
+ * Exit codes: 0 = clean (selfcheck: no fail-tier deduction; doctor: nothing
+ * broken or all fixed), 1 = problems found (selfcheck: fail-tier deduction;
+ * doctor: broken plugins reported but not fixed), 2 = usage error.
+ *
+ * The npm consistency check honors DSH_INSIGHTS_NPM_REGISTRY; the shell seed
+ * table resolution honors DSH_INSIGHTS_DSH_ROOT (tests point both at fakes).
  *
  * @module dsh-insights-kit/cli
  */
 
 import { SelfcheckError, runSelfcheck, type SelfcheckReport } from './host/selfcheck.ts'
+import { editBundles, findDependents, readBundlesShape } from './host/ops.ts'
+import { checkClientCompat } from './host/shell.ts'
+import { resolveProfileDir } from './host/installed.ts'
 
 type Lang = 'zh' | 'en'
 
@@ -43,19 +56,25 @@ const USAGE = `dsh-insights-kit — DSH Insights helper CLI
 
 Usage:
   dsh-insights-kit selfcheck <dir> [--json] [--lang zh|en]
+  dsh-insights-kit doctor [--fix] [--profile <name>] [--json] [--lang zh|en]
 
 Commands:
   selfcheck <dir>   Score a local plugin directory with the health-v5
                     rulebook (read-only: nothing is modified).
+  doctor            Check the installed plugins' client bundles against the
+                    on-disk dsh shell's module table — works when dsh web
+                    itself will not boot. --fix disables the broken ones
+                    (load-list only; files kept, re-enable any time).
 
 Options:
   --json            Print the full report as JSON.
   --lang zh|en      Output language (default: $LANG — zh* → 中文, else English).
+  --profile <name>  dsh profile to inspect (default: web / $DSH_INSIGHTS_PROFILE).
   -h, --help        Show this help.
 
 Exit codes:
-  0  no fail-tier deduction
-  1  at least one fail-tier deduction (use as a CI pre-publish gate)
+  0  clean (selfcheck: no fail-tier deduction; doctor: nothing broken/fixed)
+  1  problems found (selfcheck: fail-tier deduction; doctor: broken plugins)
   2  usage error or invalid directory
 `
 
@@ -179,12 +198,160 @@ function printReport(report: SelfcheckReport, lang: Lang): void {
   process.stdout.write(`${out.join('\n')}\n`)
 }
 
+// ── doctor: boot-failure recovery (offline) ──────────────────────────────────
+
+interface DoctorArgs {
+  fix: boolean
+  json: boolean
+  lang: string | null
+  profile: string | null
+}
+
+function parseDoctorArgs(rest: string[]): DoctorArgs {
+  const args: DoctorArgs = { fix: false, json: false, lang: null, profile: null }
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i]!
+    if (arg === '--fix') {
+      args.fix = true
+    } else if (arg === '--json') {
+      args.json = true
+    } else if (arg === '--lang') {
+      const value = rest[++i]
+      if (value !== 'zh' && value !== 'en') throw new SelfcheckError('usage', `--lang expects zh or en, got ${value ?? '(nothing)'}`)
+      args.lang = value
+    } else if (arg.startsWith('--lang=')) {
+      const value = arg.slice('--lang='.length)
+      if (value !== 'zh' && value !== 'en') throw new SelfcheckError('usage', `--lang expects zh or en, got ${value}`)
+      args.lang = value
+    } else if (arg === '--profile') {
+      const value = rest[++i]
+      if (!value) throw new SelfcheckError('usage', '--profile expects a profile name')
+      args.profile = value
+    } else if (arg.startsWith('--profile=')) {
+      args.profile = arg.slice('--profile='.length)
+    } else {
+      throw new SelfcheckError('usage', `unknown option: ${arg}`)
+    }
+  }
+  return args
+}
+
+/**
+ * Report (and with --fix, quarantine) installed plugins whose client bundle
+ * the on-disk shell can no longer resolve. Pure filesystem work — the whole
+ * point is that it runs when `dsh web` will not boot.
+ */
+function runDoctor(args: DoctorArgs): number {
+  const lang = detectLang(args.lang)
+  const t = (zh: string, en: string): string => (lang === 'zh' ? zh : en)
+  if (args.profile !== null) process.env.DSH_INSIGHTS_PROFILE = args.profile
+  const { profile, dir } = resolveProfileDir()
+  const report = checkClientCompat()
+  const broken = report.rows.filter((row) => row.status === 'broken')
+  const unknown = report.rows.filter((row) => row.status === 'unknown')
+  const noClient = report.rows.filter((row) => row.status === 'no-client').length
+  const fixed: string[] = []
+  const fixFailed: string[] = []
+
+  if (args.fix && broken.length > 0) {
+    if (readBundlesShape(dir) !== 'list') {
+      throw new SelfcheckError(
+        'unsupported-profile',
+        t(
+          `profile ${profile} 没有 dsh.profile.bundles 装载清单（全量加载形态），无法单独禁用插件——请手工编辑 ${dir}/package.json 的 dependencies`,
+          `profile ${profile} has no dsh.profile.bundles load list (all-dependencies-load shape); single-plugin disable is not expressible — edit ${dir}/package.json dependencies by hand`,
+        ),
+      )
+    }
+    for (const row of broken) {
+      // A disabled dependency is an unloaded one: dependents would break at
+      // the next boot instead. Surface them; the disable still proceeds
+      // because the dependent of a broken plugin is already broken in
+      // practice — but the user must see the chain.
+      const dependents = findDependents(dir, row.name).filter((d) => !broken.some((b) => b.name === d))
+      if (dependents.length > 0) {
+        process.stderr.write(t(
+          `注意：${dependents.join(', ')} 依赖 ${row.name}，禁用后它们也会受影响\n`,
+          `note: ${dependents.join(', ')} depend on ${row.name}; disabling affects them too\n`,
+        ))
+      }
+      if (editBundles(dir, row.name, 'remove')) fixed.push(row.name)
+      else fixFailed.push(row.name)
+    }
+  }
+
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify({
+      profile,
+      profileDir: dir,
+      shell: report.shell,
+      broken: broken.map((row) => ({ name: row.name, missing: row.missing })),
+      unknown: unknown.map((row) => row.name),
+      noClient,
+      fixed: args.fix ? fixed : undefined,
+      fixFailed: args.fix ? fixFailed : undefined,
+    }, null, 2)}\n`)
+  } else {
+    const out: string[] = []
+    if (report.shell === null) {
+      out.push(t(
+        '未找到本机 dsh 安装树，无法校验（可用 DSH_INSIGHTS_DSH_ROOT 指向安装根）。',
+        'No local dsh install tree found — cannot check (point DSH_INSIGHTS_DSH_ROOT at the install root).',
+      ))
+      process.stdout.write(`${out.join('\n')}\n`)
+      return 0
+    }
+    out.push(t(
+      `dsh shell：${report.shell.version ?? '未知版本'}（seed ${report.shell.seedWords.length} 个模块）· profile：${profile}`,
+      `dsh shell: ${report.shell.version ?? 'unknown'} (${report.shell.seedWords.length} seed modules) · profile: ${profile}`,
+    ))
+    if (broken.length === 0) {
+      out.push(t(
+        `已检查 ${report.rows.length - noClient} 个有界面的插件：全部兼容 ✓`,
+        `${report.rows.length - noClient} UI-carrying plugin(s) checked — all compatible ✓`,
+      ))
+    } else {
+      out.push(t(
+        `${broken.length} 个插件在当前 dsh 构建下无法加载（会导致 dsh web 启动失败）：`,
+        `${broken.length} plugin(s) cannot load on the current dsh build (they break the dsh web boot):`,
+      ))
+      for (const row of broken) {
+        out.push(`  ✗ ${row.name} — ${t('无法解析', 'unresolvable')}: ${row.missing.join(', ')}`)
+      }
+      if (args.fix) {
+        for (const name of fixed) out.push(t(`  已禁用 ${name} ✓`, `  disabled ${name} ✓`))
+        for (const name of fixFailed) out.push(t(`  禁用失败：${name}（请手工编辑装载清单）`, `  failed to disable: ${name} (edit the load list by hand)`))
+        if (fixed.length > 0) {
+          out.push(t(
+            '已把上述插件移出装载清单（文件保留）。现在重启 dsh web 即可正常启动；恢复：在「生态」面板重新启用，或 dsh plugin add <name>。',
+            'The above plugins are out of the load list (files kept). dsh web should boot now; re-enable any time from the「生态」panel or with dsh plugin add <name>.',
+          ))
+        }
+      } else {
+        out.push(t(
+          '修复：dsh-insights-kit doctor --fix（移出装载清单、文件保留、随时可恢复）',
+          'Fix: dsh-insights-kit doctor --fix (drops them from the load list; files kept, reversible)',
+        ))
+      }
+    }
+    if (unknown.length > 0) {
+      out.push(t(`未能判定（界面包不可读）：${unknown.join(', ')}`, `undecidable (bundle unreadable): ${unknown.join(', ')}`))
+    }
+    process.stdout.write(`${out.join('\n')}\n`)
+  }
+  if (broken.length === 0) return 0
+  return args.fix && fixFailed.length === 0 ? 0 : 1
+}
+
 async function main(argv: string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
     process.stdout.write(USAGE)
     return argv.length === 0 ? 2 : 0
   }
   const [command, ...rest] = argv
+  if (command === 'doctor') {
+    return runDoctor(parseDoctorArgs(rest))
+  }
   if (command !== 'selfcheck') {
     process.stderr.write(`unknown command: ${command ?? ''}\n\n${USAGE}`)
     return 2
