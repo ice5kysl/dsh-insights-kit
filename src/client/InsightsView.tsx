@@ -202,13 +202,13 @@ const copyButtonStyle: CSSProperties = {
  * successful copy. stopPropagation keeps the surrounding row's onPick from
  * firing.
  */
-function CopyCommandButton(props: { command: string; label: string }): JSX.Element {
-  const { command, label } = props
+function CopyCommandButton(props: { command: string; label: string; hint?: string }): JSX.Element {
+  const { command, label, hint } = props
   const [copied, setCopied] = useState(false)
   return (
     <button
       style={copyButtonStyle}
-      title={command}
+      title={hint ?? command}
       onClick={(event) => {
         event.stopPropagation()
         void navigator.clipboard.writeText(command).then(() => {
@@ -540,8 +540,8 @@ function ObservedBadge({ observed, observedAt }: { observed?: ScenarioObserved; 
  * clickable. A span (not a disabled button) so the reason tooltip still
  * shows; the visuals reuse the muted copy-button style, just dimmed.
  */
-function DiscouragedInstallButton({ observed }: { observed?: ScenarioObserved }): JSX.Element {
-  const reason = observedFailInstallReason(observed)
+function DiscouragedInstallButton({ observed, fullName }: { observed?: ScenarioObserved; fullName?: string }): JSX.Element {
+  const reason = observedFailInstallReason(observed, fullName)
   return (
     <span
       style={{ ...copyButtonStyle, opacity: 0.55, cursor: 'not-allowed' }}
@@ -629,6 +629,13 @@ function UpgradeBanner(): JSX.Element | null {
           '⚠ 先别升 dsh {lat}：{n} 个已装插件在新版实测加载失败（{names}）',
           '⚠ Hold off on dsh {lat}: {n} installed plugin(s) fail to load on it ({names})',
           { lat: check.latest, n: fail, names: failedNames.join(', ') },
+        )}
+      </div>
+      <div style={{ ...mutedStyle, marginTop: 4 }}>
+        {L(
+          '跑 {cmd} 看本机完整诊断（只读，零安装）',
+          'Run {cmd} for a full local diagnostic (read-only, zero install)',
+          { cmd: 'npx dsh-why' },
         )}
       </div>
     </div>
@@ -774,6 +781,24 @@ function DisableButton(props: { pkgName: string }): JSX.Element | null {
         <span style={{ ...mutedStyle, color: '#dc2626' }} title={message}>{L('失败', 'Failed')}</span>
       )}
     </span>
+  )
+}
+
+/**
+ *「跑 npx dsh-why 看本机诊断」signpost on「无法加载」rows — dsh-why is the
+ * zero-install read-only local diagnostics CLI (github.com/ice5kysl/dsh-why),
+ * the right next step when a plugin fails on THIS machine. Rendered as the
+ * same copyable command button idiom as the install-command fallback; only
+ * for rows the shell pre-check marks broken.
+ */
+function WhyCopyButton({ report }: { report: ClientCompatRow | undefined }): JSX.Element | null {
+  if (!report || report.status !== 'broken') return null
+  return (
+    <CopyCommandButton
+      command="npx dsh-why"
+      label={L('复制诊断命令', 'Copy diagnostics')}
+      hint={L('跑 npx dsh-why 看本机诊断（只读，零安装）', 'Run npx dsh-why for a local diagnostic (read-only, zero install)')}
+    />
   )
 }
 
@@ -1055,6 +1080,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
                   {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
+                  <WhyCopyButton report={compatByName.get(row.name)} />
                   <span style={mutedStyle}>{audit.auditFailed ? L('未体检', 'not audited') : L('体检中…', 'auditing…')}</span>
                 </li>
               )
@@ -1067,6 +1093,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
                   {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
+                  <WhyCopyButton report={compatByName.get(row.name)} />
                   <span style={mutedStyle}>
                     {row.plugin
                       ? L('未收录（不在权威集）', 'unlisted (not in the corpus)')
@@ -1094,6 +1121,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                   {row.version && <span style={mutedStyle}>@{row.version}</span>}
                   <ShellCompatPill report={compatByName.get(row.name)} />
                   {compatByName.get(row.name)?.status === 'broken' && <DisableButton pkgName={row.name} />}
+                  <WhyCopyButton report={compatByName.get(row.name)} />
                   <Stars n={card.stars} />
                   {drift && (
                     <span style={{ background: '#ca8a04', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px' }}
@@ -1626,7 +1654,7 @@ function ScenariosSection(props: {
                     </button>
                     {plugin.pkgName && (
                       scenarioInstallBlocked(plugin.observed) ? (
-                        <DiscouragedInstallButton observed={plugin.observed} />
+                        <DiscouragedInstallButton observed={plugin.observed} fullName={plugin.full_name} />
                       ) : (
                         <InstallActionButton pkgName={plugin.pkgName} installed={isInstalled} />
                       )

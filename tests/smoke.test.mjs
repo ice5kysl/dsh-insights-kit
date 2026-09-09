@@ -1463,6 +1463,27 @@ await check('scenario install gate: observed fail blocks the install entry, ok/u
   if (noMods.zh.includes('缺失模块') || noMods.en.includes('missing modules')) {
     throw new Error('no missing list → no modules clause')
   }
+  // The signpost here is the plugin's detail page (the failure is the
+  // plugin's own shell incompatibility, not a local environment problem) —
+  // and never dsh-why.
+  const withLink = observedFailInstallReason({ verdict: 'broken-since', atCurrentShell: 'fail' }, 'bbb/dsh-beta')
+  if (!withLink.zh.includes('为什么：https://dsh-insights.com/p/bbb/dsh-beta/')) {
+    throw new Error(`details-page pointer missing: ${withLink.zh}`)
+  }
+  if (withLink.zh.includes('dsh-why') || withLink.en.includes('dsh-why')) {
+    throw new Error('dsh-why must NOT be signposted on the discouraged-install tooltip')
+  }
+})
+
+await check('dsh-why signposts ship in the client bundle (无法加载 rows + upgrade fail branch)', async () => {
+  // Presentation-only wiring: assert the built client carries the command
+  // and both zh touchpoints. The build escapes non-ASCII as uppercase \uXXXX.
+  const bundle = readFileSync(join(rootDir, 'lib/client.js'), 'utf8')
+  if (!bundle.includes('npx dsh-why')) throw new Error('npx dsh-why command missing from the client bundle')
+  const esc = (text) => [...text].map((c) => c.charCodeAt(0) > 127 ? '\\u' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') : c).join('')
+  for (const zh of ['复制诊断命令', '跑 npx dsh-why 看本机诊断', '本机完整诊断']) {
+    if (!bundle.includes(esc(zh))) throw new Error(`zh signpost missing from the bundle: ${zh}`)
+  }
 })
 
 await check('dynamics passthrough', async () => {

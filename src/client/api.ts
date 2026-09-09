@@ -111,13 +111,18 @@ export function scenarioInstallBlocked(observed?: ScenarioObserved): boolean {
 /**
  * Tooltip reason for the disabled install entry — names the consequence
  * (a failing client bundle takes down the whole web plugin system on boot)
- * plus the missing modules when the matrix recorded them.
+ * plus the missing modules when the matrix recorded them. This failure is
+ * the plugin's own incompatibility with the current shell, NOT a local
+ * environment problem, so the pointer is the plugin's detail page (the
+ * observed matrix evidence), never a local-diagnostics tool. `fullName`
+ * (owner/repo) adds that pointer.
  */
-export function observedFailInstallReason(observed?: ScenarioObserved): { zh: string; en: string } {
+export function observedFailInstallReason(observed?: ScenarioObserved, fullName?: string): { zh: string; en: string } {
   const mods = (observed?.missing ?? []).join(', ')
+  const page = fullName ? `https://dsh-insights.com/p/${fullName}/` : null
   return {
-    zh: `实测在当前 dsh 版本加载失败${mods ? `（缺失模块：${mods}）` : ''}，安装会导致整个 web 端插件系统崩溃`,
-    en: `Observed failing to load on the current dsh build${mods ? ` (missing modules: ${mods})` : ''} — installing it would crash the whole web plugin system`,
+    zh: `实测在当前 dsh 版本加载失败${mods ? `（缺失模块：${mods}）` : ''}，安装会导致整个 web 端插件系统崩溃${page ? ` · 为什么：${page}` : ''}`,
+    en: `Observed failing to load on the current dsh build${mods ? ` (missing modules: ${mods})` : ''} — installing it would crash the whole web plugin system${page ? ` · why: ${page}` : ''}`,
   }
 }
 
