@@ -54,6 +54,8 @@ import {
   fetchScenarios,
   fetchUpgradeCheck,
   installPlugin,
+  observedFailInstallReason,
+  scenarioInstallBlocked,
   searchPlugins,
   uninstallPlugin,
   disablePlugin,
@@ -528,6 +530,28 @@ function ObservedBadge({ observed, observedAt }: { observed?: ScenarioObserved; 
     )
   }
   return null
+}
+
+/**
+ * Disabled「不建议安装」entry replacing the install button on scenario picks
+ * whose observed load test FAILED at the running dsh version — installing a
+ * bundle the shell cannot resolve takes down the whole web plugin system on
+ * the next boot (the red-screen crash class), so the entry must not look
+ * clickable. A span (not a disabled button) so the reason tooltip still
+ * shows; the visuals reuse the muted copy-button style, just dimmed.
+ */
+function DiscouragedInstallButton({ observed }: { observed?: ScenarioObserved }): JSX.Element {
+  const reason = observedFailInstallReason(observed)
+  return (
+    <span
+      style={{ ...copyButtonStyle, opacity: 0.55, cursor: 'not-allowed' }}
+      title={L(reason.zh, reason.en)}
+      aria-disabled="true"
+      onClick={(event) => event.stopPropagation()}
+    >
+      {L('不建议安装', 'Not recommended')}
+    </span>
+  )
 }
 
 /**
@@ -1601,7 +1625,11 @@ function ScenariosSection(props: {
                       )}
                     </button>
                     {plugin.pkgName && (
-                      <InstallActionButton pkgName={plugin.pkgName} installed={isInstalled} />
+                      scenarioInstallBlocked(plugin.observed) ? (
+                        <DiscouragedInstallButton observed={plugin.observed} />
+                      ) : (
+                        <InstallActionButton pkgName={plugin.pkgName} installed={isInstalled} />
+                      )
                     )}
                   </div>
                 </li>

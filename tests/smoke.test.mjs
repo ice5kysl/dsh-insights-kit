@@ -37,7 +37,7 @@ import { extractRequires, extractSeedWords } from '../src/host/shell.ts'
 import { computeUpgradeCheck, observedAtShell, observedByPkg } from '../src/host/upstream.ts'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
-import { classifyCheckInput } from '../src/client/api.ts'
+import { classifyCheckInput, observedFailInstallReason, scenarioInstallBlocked } from '../src/client/api.ts'
 import { SelfcheckError, runSelfcheck } from '../src/host/selfcheck.ts'
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -1445,6 +1445,23 @@ await check('legacy upstream (no compat-observed.json): scenarios + upgrade-chec
     // Dispose the extra instance so later tests (effects[1] = the dead-port
     // instance) see the same registration indices as before.
     for (const dispose of effects.splice(effectsBefore)) dispose()
+  }
+})
+
+await check('scenario install gate: observed fail blocks the install entry, ok/untested do not', async () => {
+  if (scenarioInstallBlocked(undefined)) throw new Error('no observed data must not block')
+  if (scenarioInstallBlocked({ verdict: 'ok', atCurrentShell: 'ok' })) throw new Error('ok must not block')
+  if (scenarioInstallBlocked({ verdict: 'never', atCurrentShell: null })) throw new Error('untested (null) must not block')
+  if (!scenarioInstallBlocked({ verdict: 'broken-since', atCurrentShell: 'fail', missing: ['m'] })) throw new Error('fail must block')
+  // The disabled-entry tooltip names the consequence and the missing modules.
+  const reason = observedFailInstallReason({ verdict: 'broken-since', atCurrentShell: 'fail', missing: ['@deepseek-ai/dsh-client-store'] })
+  if (!reason.zh.includes('@deepseek-ai/dsh-client-store') || !reason.zh.includes('崩溃')) {
+    throw new Error(`reason must name the modules + consequence: ${reason.zh}`)
+  }
+  if (!reason.en.includes('missing modules: @deepseek-ai/dsh-client-store')) throw new Error(`en reason wrong: ${reason.en}`)
+  const noMods = observedFailInstallReason({ verdict: 'never', atCurrentShell: 'fail' })
+  if (noMods.zh.includes('缺失模块') || noMods.en.includes('missing modules')) {
+    throw new Error('no missing list → no modules clause')
   }
 })
 

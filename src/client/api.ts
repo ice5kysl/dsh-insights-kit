@@ -98,6 +98,29 @@ export interface ScenariosDoc {
   observedAt?: string | null
 }
 
+/**
+ * Whether a scenario pick's install entry must be replaced by the disabled
+ *「不建议安装」state: true only when the observed matrix saw the plugin FAIL
+ * to load at the running dsh version. ok / untested / no-data picks keep the
+ * normal install action.
+ */
+export function scenarioInstallBlocked(observed?: ScenarioObserved): boolean {
+  return observed?.atCurrentShell === 'fail'
+}
+
+/**
+ * Tooltip reason for the disabled install entry — names the consequence
+ * (a failing client bundle takes down the whole web plugin system on boot)
+ * plus the missing modules when the matrix recorded them.
+ */
+export function observedFailInstallReason(observed?: ScenarioObserved): { zh: string; en: string } {
+  const mods = (observed?.missing ?? []).join(', ')
+  return {
+    zh: `实测在当前 dsh 版本加载失败${mods ? `（缺失模块：${mods}）` : ''}，安装会导致整个 web 端插件系统崩溃`,
+    en: `Observed failing to load on the current dsh build${mods ? ` (missing modules: ${mods})` : ''} — installing it would crash the whole web plugin system`,
+  }
+}
+
 export interface ReleaseRow {
   tag: string
   name?: string
