@@ -165,22 +165,28 @@ export function similarByCategory(doc: unknown, fullName: string, limit = 5): Si
 
 // ── compat-observed.json (observed load-test matrix, CC BY 4.0) ─────────────
 //
-// The site's runner actually boots each plugin's client bundle against a
-// matrix of historical dsh shell builds. Wire shape (all fields optional in
+// The site's runner statically analyzes each plugin's client bundle against a
+// matrix of historical dsh shell builds (code-state require literals × the
+// loader's real resolution order). Wire shape (all fields optional in
 // practice — parse defensively):
 //
 //   { generatedAt, allShellVersions: string[], shellDistTags: {latest,…},
 //     plugins: { <npm name>: { repo, version, requires,
-//       results: { <shell version>: {status:'ok'} | {status:'broken',missing[]} },
-//       verdict: { cls: 'ok'|'never'|'broken-since'|'supported-since'|'mixed' } } } }
+//       results: { <shell version>: {status:'ok'} | {status:'broken',missing[]}
+//                | {status:'conditional',conditional[]} },
+//       verdict: { cls: 'ok'|'never'|'broken-since'|'supported-since'|'conditional'|'mixed' } } } }
 //
-// Observed statuses seen in the wild are exactly 'ok' and 'broken'; anything
-// else string-shaped is treated as a failure by the mappings below.
+// 'conditional' (2026-09-10 model fix): the require names a built-in graph
+// row the plugin did not declare — the loader's factory branch usually
+// resolves it (batch timing), so it is NOT a crash. Treated as its own
+// state everywhere — never folded into fail.
 
 /** One observed load outcome at one shell version. */
 export interface ObservedResult {
   status: string
   missing: string[]
+  /** Built-in graph rows that resolve only by batch timing (status 'conditional'). */
+  conditional?: string[]
 }
 
 /** The per-plugin observed slice (keyed by npm package name, lowercased). */
@@ -212,11 +218,15 @@ export function observedByPkg(doc: unknown): Map<string, ObservedPlugin> {
         const status = (entry as { status?: unknown }).status
         if (typeof status !== 'string' || !status) continue
         const missingRaw = (entry as { missing?: unknown }).missing
+        const condRaw = (entry as { conditional?: unknown }).conditional
         results[shell] = {
           status,
           missing: Array.isArray(missingRaw)
             ? missingRaw.filter((m): m is string => typeof m === 'string')
             : [],
+          ...(Array.isArray(condRaw)
+            ? { conditional: condRaw.filter((m): m is string => typeof m === 'string') }
+            : {}),
         }
       }
     }
@@ -239,22 +249,31 @@ export function observedGeneratedAt(doc: unknown): string | null {
 
 /** The wire tri-state for one plugin at one shell version. */
 export interface ObservedAtShell {
-  /** 'ok' | 'fail' (any non-ok status) | null (plugin/shell version untested). */
-  atCurrentShell: 'ok' | 'fail' | null
+  /** 'ok' | 'conditional' (graph-row timing, not a crash) | 'fail' | null (untested). */
+  atCurrentShell: 'ok' | 'fail' | 'conditional' | null
   /** Unresolvable modules at that shell (present only on a fail with a list). */
   missing?: string[]
+  /** Timing-resolved graph rows at that shell (present only on conditional). */
+  conditional?: string[]
 }
 
 /**
  * One plugin's observed outcome at one shell version (typically the running
  * dsh version): null when either side is unknown or the matrix never tested
- * that combination; any non-'ok' status maps to 'fail'.
+ * that combination. 'ok' → ok; 'conditional' → its own state (never a fail);
+ * any other status maps to 'fail'.
  */
 export function observedAtShell(entry: ObservedPlugin | undefined, shell: string | null): ObservedAtShell {
   if (!entry || !shell) return { atCurrentShell: null }
   const result = entry.results[shell]
   if (!result) return { atCurrentShell: null }
   if (result.status === 'ok') return { atCurrentShell: 'ok' }
+  if (result.status === 'conditional') {
+    return {
+      atCurrentShell: 'conditional',
+      ...(result.conditional && result.conditional.length > 0 ? { conditional: result.conditional } : {}),
+    }
+  }
   return {
     atCurrentShell: 'fail',
     ...(result.missing.length > 0 ? { missing: result.missing } : {}),
@@ -263,7 +282,7 @@ export function observedAtShell(entry: ObservedPlugin | undefined, shell: string
 
 // ── upgrade-check (实测矩阵 × 已装清单) ──────────────────────────────────────
 
-export type UpgradeRowStatus = 'ok' | 'fail' | 'unknown' | 'stale'
+export type UpgradeRowStatus = 'ok' | 'fail' | 'conditional' | 'unknown' | 'stale'
 
 export interface UpgradeCheckRow {
   name: string
@@ -277,7 +296,7 @@ export interface UpgradeCheckResult {
   available: boolean
   current: string | null
   latest: string | null
-  counts: { ok: number; fail: number; unknown: number; stale: number; total: number }
+  counts: { ok: number; fail: number; conditional: number; unknown: number; stale: number; total: number }
   rows: UpgradeCheckRow[]
   /** compat-observed generatedAt (null when the doc is absent). */
   observedAt: string | null
@@ -325,6 +344,8 @@ function resolveObservedLatest(doc: unknown, dynamics: unknown): string | null {
  * AT the latest shell version:
  *
  * - 'ok' / 'fail' — the matrix's verdict at that shell;
+ * - 'conditional' — a built-in graph row resolves it in practice (batch
+ *   timing); NOT a crash, never counted as fail;
  * - 'stale'       — the matrix measured a DIFFERENT plugin version than the
  *   one installed (the plugin was updated after the matrix run — the verdict
  *   cannot be trusted either way, so it counts in neither ok nor fail);
@@ -342,7 +363,7 @@ export function computeUpgradeCheck(
 ): UpgradeCheckResult {
   const observed = observedByPkg(doc)
   const latest = resolveObservedLatest(doc, dynamics)
-  const counts = { ok: 0, fail: 0, unknown: 0, stale: 0, total: installed.length }
+  const counts = { ok: 0, fail: 0, conditional: 0, unknown: 0, stale: 0, total: installed.length }
   const rows: UpgradeCheckRow[] = installed.map(({ name, version }) => {
     const entry = observed.get(name.toLowerCase())
     const result = latest !== null ? entry?.results[latest] : undefined
@@ -357,7 +378,7 @@ export function computeUpgradeCheck(
       status = 'stale'
       measuredVersion = entry.version
     } else {
-      status = result.status === 'ok' ? 'ok' : 'fail'
+      status = result.status === 'ok' ? 'ok' : result.status === 'conditional' ? 'conditional' : 'fail'
     }
     counts[status] += 1
     return { name, status, ...(measuredVersion !== undefined ? { measuredVersion } : {}) }

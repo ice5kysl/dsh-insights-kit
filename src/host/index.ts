@@ -353,13 +353,14 @@ async function handleRequest(
           const annotated = pkgName ? { ...plugin, pkgName } : { ...plugin }
           const entry = pkgName ? observed.get(pkgName.toLowerCase()) : undefined
           if (!entry) return pkgName ? annotated : plugin
-          const { atCurrentShell, missing } = observedAtShell(entry, currentShell)
+          const { atCurrentShell, missing, conditional } = observedAtShell(entry, currentShell)
           return {
             ...annotated,
             observed: {
               verdict: entry.verdict,
               atCurrentShell,
               ...(missing ? { missing } : {}),
+              ...(conditional ? { conditional } : {}),
             },
           }
         }),

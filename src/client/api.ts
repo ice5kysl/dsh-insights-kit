@@ -62,9 +62,13 @@ export interface SearchHit {
  */
 export interface ScenarioObserved {
   verdict: string | null
-  atCurrentShell: 'ok' | 'fail' | null
+  /** 'conditional' = built-in graph row resolves it in practice (batch
+   *  timing) — NOT a crash, never blocks install. */
+  atCurrentShell: 'ok' | 'fail' | 'conditional' | null
   /** Modules the bundle failed to resolve at the current shell (fail only). */
   missing?: string[]
+  /** Graph rows resolved only by batch timing (conditional only). */
+  conditional?: string[]
 }
 
 export interface ScenarioPlugin {
@@ -369,9 +373,10 @@ export async function fetchCompat(): Promise<{ compat: ClientCompatReport }> {
 export interface UpgradeCheckRow {
   name: string
   /** Observed outcome at the latest matrix shell ('unknown' = untested;
+   *  'conditional' = graph-row timing, loads in practice, never a crash;
    *  'stale' = the matrix measured a different plugin version than the one
    *  installed — no conclusion either way, never blocks an upgrade). */
-  status: 'ok' | 'fail' | 'unknown' | 'stale'
+  status: 'ok' | 'fail' | 'conditional' | 'unknown' | 'stale'
   /** The plugin version the matrix actually measured (stale rows only). */
   measuredVersion?: string
 }
@@ -381,7 +386,7 @@ export interface UpgradeCheck {
   available: boolean
   current: string | null
   latest: string | null
-  counts: { ok: number; fail: number; unknown: number; stale?: number; total: number }
+  counts: { ok: number; fail: number; conditional?: number; unknown: number; stale?: number; total: number }
   rows: UpgradeCheckRow[]
   observedAt: string | null
 }

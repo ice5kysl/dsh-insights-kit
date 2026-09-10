@@ -69,12 +69,16 @@ export function extractRequires(bundleText: string): string[] {
   // esbuild keeps externals as require("x"); some pipelines emit __require("x")
   // for the same purpose. Only plain string literals count — computed and
   // template (`require(`${spec}`)`) requires are not statically decidable and
-  // are left out rather than reported as bogus missing modules.
+  // are left out rather than reported as bogus missing modules. Relative and
+  // absolute specifiers are excluded too: bundle-local module tables (the
+  // localRequire pattern) serve them and they never reach the loader.
   const pattern = /\b__require\(\s*["']([^"']+)["']\s*\)|\brequire\(\s*["']([^"']+)["']\s*\)/g
   let match: RegExpExecArray | null
   while ((match = pattern.exec(bundleText)) !== null) {
     const spec = match[1] ?? match[2]!
-    if (!spec.includes('${')) seen.add(spec)
+    if (spec.includes('${')) continue
+    if (spec[0] === '.' || spec[0] === '/') continue
+    seen.add(spec)
   }
   return [...seen]
 }

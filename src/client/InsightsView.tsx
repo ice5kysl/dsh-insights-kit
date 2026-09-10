@@ -529,6 +529,21 @@ function ObservedBadge({ observed, observedAt }: { observed?: ScenarioObserved; 
       </span>
     )
   }
+  if (observed.atCurrentShell === 'conditional') {
+    const mods = (observed.conditional ?? []).join(', ')
+    return (
+      <span
+        style={{ ...installedPillStyle, color: '#b45309', borderColor: '#b45309' }}
+        title={L(
+          '实测：当前 dsh 版本条件可解析（内置图行 {mods}，批次时序通常可解析；非崩溃）· 数据截至 {at}',
+          'Observed: conditional on the current dsh build (built-in graph rows {mods} — batch timing usually resolves; not a crash) · data as of {at}',
+          { mods: mods || '?', at },
+        )}
+      >
+        ◐ {L('条件可解析', 'conditional')}
+      </span>
+    )
+  }
   return null
 }
 
@@ -585,6 +600,14 @@ function UpgradeBanner(): JSX.Element | null {
   // installed (absent on pre-0.9.3 hosts) — no conclusion either way: it
   // neither counts as compatible nor blocks an upgrade, same as unknown.
   const stale = check.counts.stale ?? 0
+  // Conditional = a built-in graph row resolves the plugin in practice
+  // (batch timing): not a crash, never blocks an upgrade (pre-0.9.6 hosts
+  // lack the field).
+  const conditional = check.counts.conditional ?? 0
+  const condNames = check.rows.filter((row) => row.status === 'conditional').map((row) => row.name)
+  const condNote = conditional > 0
+    ? L('、{n} 个条件可解析', ', {n} conditional', { n: conditional })
+    : ''
   const failedNames = check.rows.filter((row) => row.status === 'fail').map((row) => row.name)
   if (!outdated) {
     return (
@@ -599,6 +622,11 @@ function UpgradeBanner(): JSX.Element | null {
           {fail > 0 && (
             <span style={{ color: '#dc2626' }} title={failedNames.join(', ')}>
               {L('、{n} 个加载失败', ', {n} failing to load', { n: fail })}
+            </span>
+          )}
+          {conditional > 0 && (
+            <span style={{ color: '#b45309' }} title={condNames.join(', ')}>
+              {condNote}
             </span>
           )}
           {stale > 0 && L('、{n} 个刚更新待复测', ', {n} just updated, retest pending', { n: stale })}
@@ -616,6 +644,11 @@ function UpgradeBanner(): JSX.Element | null {
             { lat: check.latest, total, ok },
           )}
           {unknown > 0 && L('、{n} 个未实测', ', {n} untested', { n: unknown })}
+          {conditional > 0 && (
+            <span style={{ color: '#b45309' }} title={condNames.join(', ')}>
+              {condNote}
+            </span>
+          )}
           {stale > 0 && L('、{n} 个刚更新待复测', ', {n} just updated, retest pending', { n: stale })}
           {L('，可以升', ' — safe to upgrade')}
         </div>
