@@ -19,14 +19,30 @@
  * smoke test can run it against a local fixture server with no network.
  * Trimming/search helpers are pure and exported for direct unit-style tests.
  *
+ * One freshness overlay: `dynamics.json` regenerates ~daily, so its dsh
+ * dist-tags lag an official release by up to a day. `npmDistTags()` fetches
+ * `@deepseek-ai/dsh`'s dist-tags straight from the npm registry (free,
+ * unauthenticated) on a 5-minute TTL; the `/dynamics` route overlays them so
+ * the Audit tab's "latest release" is announcement-day fresh.
+ *
  * @module dsh-insights-kit/upstream
  */
 
 import { enrichDrops, type DropInfo } from './drops.ts'
+import { DEFAULT_NPM_REGISTRY } from './selfcheck.ts'
 import { compareBaseVersions } from '../shared/compat.ts'
 
 export const DEFAULT_BASE_URL = 'https://dsh-insights.com/data'
 export const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000
+
+/** The shell package whose dist-tags get the live registry overlay. */
+const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
+
+/**
+ * Live dist-tags TTL: short enough to pick up a release the day it is
+ * announced, long enough to stay a polite client of the registry.
+ */
+export const NPM_DIST_TAGS_TTL_MS = 5 * 60 * 1000
 
 /**
  * Per-document default origins: the whole dataset is served under the site's
@@ -555,6 +571,12 @@ export interface CacheStatus {
 export interface StoreOptions {
   /** Override the upstream base (tests point this at a fixture server). */
   baseUrl?: string
+  /**
+   * Registry base for the live dsh dist-tags overlay (defaults to the public
+   * npm registry; tests point this at the fake registry — same override as
+   * selfcheck's, wired from DSH_INSIGHTS_NPM_REGISTRY).
+   */
+  npmRegistry?: string
   ttlMs?: number
   fetchJson?: FetchJson
   now?: () => number
@@ -567,6 +589,12 @@ export interface InsightsStore {
   compat(): Promise<unknown>
   enrich(): Promise<unknown>
   compatObserved(): Promise<unknown>
+  /**
+   * Live `@deepseek-ai/dsh` dist-tags from the npm registry (5-min TTL).
+   * Resolves null on ANY failure — this is a freshness overlay, not a source
+   * of truth, so callers keep the snapshot's tags instead of erroring.
+   */
+  npmDistTags(): Promise<Record<string, string> | null>
   status(): Record<CacheName, CacheStatus>
 }
 
@@ -577,6 +605,7 @@ export interface InsightsStore {
  */
 export function createStore(options: StoreOptions = {}): InsightsStore {
   const baseUrl = options.baseUrl?.replace(/\/+$/, '')
+  const npmRegistry = (options.npmRegistry ?? DEFAULT_NPM_REGISTRY).replace(/\/+$/, '')
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS
   const fetchJson = options.fetchJson ?? defaultFetchJson
   const now = options.now ?? Date.now
@@ -603,6 +632,33 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
     return task
   }
 
+  // Live dist-tags overlay: own entry (not a CacheName — different origin,
+  // different TTL), single package, best-effort (null on failure, cached only
+  // on a successful parse so a bad response retries next request).
+  let npmTags: { tags: Record<string, string>; fetchedAt: number } | null = null
+  let npmTagsInflight: Promise<Record<string, string> | null> | null = null
+
+  function npmDistTags(): Promise<Record<string, string> | null> {
+    if (npmTags && now() - npmTags.fetchedAt < NPM_DIST_TAGS_TTL_MS) return Promise.resolve(npmTags.tags)
+    if (npmTagsInflight) return npmTagsInflight
+    const task = fetchJson(`${npmRegistry}/${DSH_NPM_PACKAGE.replace(/^@/, '%40')}`)
+      .then((doc) => {
+        const raw = (doc as { 'dist-tags'?: unknown } | null | undefined)?.['dist-tags']
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+        const tags: Record<string, string> = {}
+        for (const [tag, version] of Object.entries(raw)) {
+          if (typeof version === 'string' && version) tags[tag] = version
+        }
+        if (Object.keys(tags).length === 0) return null
+        npmTags = { tags, fetchedAt: now() }
+        return tags
+      })
+      .catch(() => null)
+      .finally(() => { npmTagsInflight = null })
+    npmTagsInflight = task
+    return task
+  }
+
   async function insights(): Promise<InsightsData> {
     const data = (await load('insights')) as Partial<InsightsData>
     return { generatedAt: data.generatedAt, plugins: Array.isArray(data.plugins) ? data.plugins : [] }
@@ -615,6 +671,7 @@ export function createStore(options: StoreOptions = {}): InsightsStore {
     compat: () => load('compat'),
     enrich: () => load('enrich'),
     compatObserved: () => load('compatObserved'),
+    npmDistTags,
     status() {
       const names: CacheName[] = ['insights', 'scenarios', 'dynamics', 'compat', 'enrich', 'compatObserved']
       const out = {} as Record<CacheName, CacheStatus>

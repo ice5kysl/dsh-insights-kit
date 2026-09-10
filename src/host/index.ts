@@ -21,7 +21,10 @@
  *   client can offer copyable install/uninstall commands, plus an `observed`
  *   slice (compat-observed verdict + outcome at the running dsh version)
  *   when the upstream publishes compat-observed.json.
- * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough.
+ * - `GET /dsh-insights/dynamics`  — dynamics.json passthrough, with the dsh
+ *   npm dist-tags overlaid live from the registry (5-min cache; the site
+ *   regenerates ~daily, so its tags lag a fresh release by up to a day — any
+ *   registry failure keeps the snapshot's tags).
  * - `GET /dsh-insights/runtime`   — the running dsh version (resolved from
  *   the installed @deepseek-ai/dsh-web-app / dsh-base package.json; null
  *   when not resolvable).
@@ -157,6 +160,18 @@ interface ScenariosDocShape {
   [key: string]: unknown
 }
 
+/** dynamics.json fields the dist-tag overlay touches (rest passes through). */
+interface DynamicsDocShape {
+  dsh?: {
+    npm?: {
+      distTags?: Record<string, string>
+      [key: string]: unknown
+    }
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
 /**
  * The running dsh version, resolved from the installed official packages'
  * package.json (web-app first, base as fallback). Null when neither resolves
@@ -190,8 +205,11 @@ export function apply(raw: unknown): void {
 
   // DSH_INSIGHTS_UPSTREAM_BASE overrides the dataset origin (used by the
   // smoke test to serve fixtures; production installs leave it unset).
+  // DSH_INSIGHTS_NPM_REGISTRY redirects the live dist-tags overlay the same
+  // way selfcheck's npm probe is redirected.
   const store = createStore({
     baseUrl: process.env.DSH_INSIGHTS_UPSTREAM_BASE || undefined,
+    npmRegistry: process.env.DSH_INSIGHTS_NPM_REGISTRY || undefined,
   })
 
   // Hot-mount carriers: leftover input files from a previous process are
@@ -372,7 +390,24 @@ async function handleRequest(
       return
     }
     if (pathname === `${PREFIX}/dynamics`) {
-      sendJson(res, 200, { ok: true, dynamics: await store.dynamics() })
+      // Passthrough plus a live dist-tag overlay: dynamics.json regenerates
+      // ~daily upstream (and is cached 6h here), so its dsh dist-tags lag an
+      // official release by up to a day — the Audit tab would keep showing
+      // yesterday's "latest release" on announcement day. The overlay is
+      // best-effort: a registry failure serves the snapshot untouched. The
+      // doc is copied, never mutated — the cached snapshot stays pristine.
+      const [doc, live] = await Promise.all([store.dynamics(), store.npmDistTags()]) as [DynamicsDocShape, Record<string, string> | null]
+      if (live === null || doc.dsh === undefined) {
+        sendJson(res, 200, { ok: true, dynamics: doc })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        dynamics: {
+          ...doc,
+          dsh: { ...doc.dsh, npm: { ...doc.dsh.npm, distTags: live, distTagsAt: new Date().toISOString() } },
+        },
+      })
       return
     }
     if (pathname === `${PREFIX}/runtime`) {

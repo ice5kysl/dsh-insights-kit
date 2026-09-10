@@ -49,7 +49,7 @@ isn't data traffic: a local Typert Remote call, see below.)
 | `/search?q=&limit=20` | Case-insensitive substring match over `full_name` + `description`, ranked by stars desc; compact rows without `dimScores`/`drops`. Limit capped at 50. |
 | `/audit?npm=a,b,c` | Batch health lookup keyed by npm package name (the 体检 Audit page): each name maps to a trimmed card (matched on the corpus row's `pkgName`, case-insensitive) or null when unlisted, with a `compat` slice attached to hits (`enginesDsh` + the first 3 `dshPeers`, joined from `compat.json` on npm name; a failed compat fetch degrades to no annotation). Comma-separated, capped at 100 names. |
 | `/scenarios` | `scenarios.json`, with each pick annotated by its npm `pkgName` (joined from the corpus on `full_name`, omitted when unknown) so the client can offer copyable install/uninstall commands. |
-| `/dynamics` | `dynamics.json` passthrough. |
+| `/dynamics` | `dynamics.json` passthrough, with the dsh npm dist-tags overlaid by a live registry fetch (5-min TTL, best-effort: failure keeps the snapshot's tags). |
 | `/runtime` | The running dsh version, resolved host-side via `createRequire(import.meta.url)` from `@deepseek-ai/dsh-web-app/package.json` (fallback `@deepseek-ai/dsh-base/package.json`); `null` when neither resolves. Local-only — no upstream fetch. |
 | `/health` | Liveness + per-document cache age/staleness. |
 
@@ -141,7 +141,8 @@ Three capability sections, each fetching lazily on first visit (tab order:
 
 1. **体检 Audit** — installed-plugin health check (see the enumeration note
    below): a「当前 dsh 版本 · 最新 release」line (running version from
-   `/runtime`, latest from `dynamics.json` dist-tags, with an upgrade hint
+   `/runtime`, latest from the `/dynamics` dist-tags — overlaid live from
+   the npm registry so it tracks the day's release, with an upgrade hint
    when behind on base versions), per-plugin grade badge + score, an
    S/A/B/C/D summary bar, npm version-drift badges (`npmLatest ≠ version`),
    a per-row dsh-compat line (`engines.dsh`, else the cordis peer range;

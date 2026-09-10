@@ -34,7 +34,7 @@ import { fileURLToPath } from 'node:url'
 import { apply } from '../lib/index.js'
 import { disableEntry, parseSimplePatch } from '../src/host/hot.ts'
 import { extractRequires, extractSeedWords } from '../src/host/shell.ts'
-import { computeUpgradeCheck, observedAtShell, observedByPkg } from '../src/host/upstream.ts'
+import { computeUpgradeCheck, createStore, observedAtShell, observedByPkg, NPM_DIST_TAGS_TTL_MS } from '../src/host/upstream.ts'
 import { installedPluginNames, npmNameOfModule } from '../src/shared/installed.ts'
 import { baseVersion, isOutdated, satisfiesSimpleRange } from '../src/shared/compat.ts'
 import { classifyCheckInput, observedFailInstallReason, scenarioInstallBlocked } from '../src/client/api.ts'
@@ -121,17 +121,27 @@ const SCENARIOS = {
   ],
 }
 
+const DSH_DYNAMICS_CORE = {
+  repo: 'deepseek-ai/DeepSeek-Harness',
+  stars: 213472,
+  releases: [
+    { tag: 'dsh-v0.1.3-alpha.1', name: 'v0.1.3-alpha.1', prerelease: true, published_at: '2026-09-04T11:34:32Z', breaking: true, summary: 'x', added: 5, fixed: 10 },
+  ],
+}
+
 const DYNAMICS = {
   fetchedAt: '2026-09-07T00:00:00.000Z',
   dsh: {
-    repo: 'deepseek-ai/DeepSeek-Harness',
-    stars: 213472,
-    releases: [
-      { tag: 'dsh-v0.1.3-alpha.1', name: 'v0.1.3-alpha.1', prerelease: true, published_at: '2026-09-04T11:34:32Z', breaking: true, summary: 'x', added: 5, fixed: 10 },
-    ],
+    ...DSH_DYNAMICS_CORE,
+    // Stale on purpose: the site snapshot lags the registry fixture above.
+    npm: { pkg: '@deepseek-ai/dsh', distTags: { latest: '0.1.2-rc.1', next: '0.1.2-rc.1', alpha: '0.1.2-alpha.5' }, modified: '2026-09-07T00:00:00.000Z' },
   },
   platform: [{ repo: 'deepseek-ai/DeepSeek-V3', stars: 104436, latestRelease: null }],
 }
+
+// The legacy fixture serves the pre-matrix site's dynamics WITHOUT dist-tags —
+// the upgrade-check degradation path needs "no latest is known".
+const DYNAMICS_LEGACY = { ...DYNAMICS, dsh: DSH_DYNAMICS_CORE }
 
 const COMPAT = {
   generatedAt: '2026-09-07T00:00:00.000Z',
@@ -192,7 +202,7 @@ process.env.DSH_INSIGHTS_UPSTREAM_BASE = `http://127.0.0.1:${fixturePort}`
 // test and disposed there.
 const legacyFixture = createServer((req, res) => {
   const name = (req.url ?? '').replace(/^\//, '')
-  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS, 'compat.json': COMPAT, 'enrich.json': ENRICH }
+  const docs = { 'insights.json': INSIGHTS, 'scenarios.json': SCENARIOS, 'dynamics.json': DYNAMICS_LEGACY, 'compat.json': COMPAT, 'enrich.json': ENRICH }
   if (docs[name]) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(docs[name]))
@@ -204,11 +214,19 @@ const legacyFixture = createServer((req, res) => {
 await new Promise((resolve) => legacyFixture.listen(0, '127.0.0.1', resolve))
 const legacyFixturePort = legacyFixture.address().port
 
-// ── fake npm registry (selfcheck consistency checks) ────────────────────────
+// ── fake npm registry (selfcheck consistency checks + live dist-tags) ────────
 
 const registry = createServer((req, res) => {
   const name = decodeURIComponent((req.url ?? '').replace(/^\//, ''))
-  if (name === 'good-pkg') {
+  if (name === '@deepseek-ai/dsh') {
+    // "Just released" — newer than anything inside the dynamics.json fixture
+    // below, so the /dynamics overlay check proves the registry wins.
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      'dist-tags': { latest: '0.1.5-rc.1', next: '0.1.5-rc.1', alpha: '0.1.5-alpha.2' },
+      versions: { '0.1.2-rc.1': {}, '0.1.5-alpha.2': {}, '0.1.5-rc.1': {} },
+    }))
+  } else if (name === 'good-pkg') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({
       'dist-tags': { latest: '1.0.0' },
@@ -1486,9 +1504,53 @@ await check('dsh-why signposts ship in the client bundle (无法加载 rows + up
   }
 })
 
-await check('dynamics passthrough', async () => {
+await check('dynamics passthrough + live dist-tag overlay', async () => {
   const { status, body } = await getJson('/dynamics')
   if (status !== 200 || body.dynamics?.dsh?.releases?.[0]?.breaking !== true) throw new Error(`status ${status}`)
+  // The registry fixture (0.1.5-rc.1) must win over the snapshot's stale
+  // 0.1.2-rc.1 — this is the announcement-day freshness path.
+  const tags = body.dynamics?.dsh?.npm?.distTags
+  if (tags?.latest !== '0.1.5-rc.1' || tags?.alpha !== '0.1.5-alpha.2') throw new Error(`overlay not applied: ${JSON.stringify(tags)}`)
+  if (typeof body.dynamics?.dsh?.npm?.distTagsAt !== 'string') throw new Error('distTagsAt missing')
+  // Untouched passthrough fields.
+  if (body.dynamics.fetchedAt !== DYNAMICS.fetchedAt || body.dynamics.dsh.npm.modified !== DYNAMICS.dsh.npm.modified) throw new Error('snapshot fields clobbered')
+})
+
+await check('npmDistTags store: TTL cache, failure and parse guards', async () => {
+  let clock = 1_000
+  let calls = 0
+  const store = createStore({
+    ttlMs: 60_000,
+    now: () => clock,
+    fetchJson: async (url) => {
+      if (url.endsWith('/%40deepseek-ai/dsh')) {
+        calls++
+        return { 'dist-tags': { latest: '0.2.0' } }
+      }
+      throw new Error(`unexpected url ${url}`)
+    },
+  })
+  const first = await store.npmDistTags()
+  const second = await store.npmDistTags()
+  if (first?.latest !== '0.2.0' || second !== first || calls !== 1) throw new Error(`cache not honored: ${calls} calls`)
+  clock += NPM_DIST_TAGS_TTL_MS + 1
+  const third = await store.npmDistTags()
+  if (calls !== 2 || third?.latest !== '0.2.0') throw new Error(`TTL expiry did not refetch: ${calls} calls`)
+  // Failure resolves null (never throws) — the snapshot keeps its tags.
+  const dead = createStore({ ttlMs: 60_000, now: () => clock, fetchJson: async () => { throw new Error('registry down') } })
+  if ((await dead.npmDistTags()) !== null) throw new Error('registry failure must resolve null')
+  // Garbage bodies resolve null without caching (next call retries).
+  let garbageCalls = 0
+  const garbage = createStore({
+    ttlMs: 60_000,
+    now: () => clock,
+    fetchJson: async () => {
+      garbageCalls++
+      return garbageCalls === 1 ? { 'dist-tags': { latest: 42, next: [] } } : { 'dist-tags': { latest: '1.0.0' } }
+    },
+  })
+  if ((await garbage.npmDistTags()) !== null) throw new Error('malformed dist-tags must resolve null')
+  if ((await garbage.npmDistTags())?.latest !== '1.0.0') throw new Error('malformed response was cached')
 })
 
 await check('health reports cache ages for loaded docs', async () => {

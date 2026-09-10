@@ -37,7 +37,7 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 | `/dsh-insights/search?q=&limit=20` | `full_name` + `description` 子串匹配（大小写不敏感），按 stars 排序；紧凑行（不含 `dimScores`/`drops`） |
 | `/dsh-insights/audit?npm=a,b,c` | 按 npm 包名批量查健康卡（「体检」页用）：每个名字 → 修剪卡或 null（未收录）；命中行附 `compat` 切片（`engines.dsh` + 前 3 个 dsh peer，join 自 `compat.json`） |
 | `/dsh-insights/scenarios` | `scenarios.json`，并按 `full_name` 从权威集为每个推荐注解 npm `pkgName`（查不到则省略），供复制安装/卸载命令使用 |
-| `/dsh-insights/dynamics` | `dynamics.json` 透传 |
+| `/dsh-insights/dynamics` | `dynamics.json` 透传，dsh 的 npm dist-tags 用 registry 实时值覆盖（5 分钟缓存、尽力而为——站点约每日才重新生成，标签滞后官方发布最多一天；`distTagsAt` 标记覆盖时间） |
 | `/dsh-insights/runtime` | 当前运行的 dsh 版本（host 端从 `@deepseek-ai/dsh-web-app` / `dsh-base` 的 package.json 解析；解析不到为 `null`） |
 | `/dsh-insights/installed` | 当前 profile 的已装插件清单，直读 profile manifest（`~/.dsh/profiles/<profile>`；可用 `DSH_INSIGHTS_PROFILE_DIR` / `DSH_INSIGHTS_PROFILE` 覆盖）：`{profile, baseline, plugins: [{name, spec, version, plugin, enabled}]}`——官方 in-box `@deepseek-ai/*` 基线计入 `baseline` 不列出；纯本地文件读取，不拉上游 |
 | `/dsh-insights/compat` | client bundle × shell 模块表预检：逐插件比对其外部 require 与磁盘上 shell 的可解析集合（`dsh-web-frontend` shell 资产内焙的 seed 词 + 有 client 面的图行包；shell 定位顺序 `DSH_INSIGHTS_DSH_ROOT` → 进程内解析 → dsh CLI 自身路径）。返回 `{shell: {version, seedWords} | null, rows: [{name, status, requires, missing}]}`，`status` ∈ ok / broken / unknown / no-client；纯本地 |
@@ -45,7 +45,7 @@ npx dsh-insights-kit selfcheck /abs/path/to/your-plugin [--json] [--lang zh|en]
 | `POST /dsh-insights/uninstall` | 即时停用 Loader 条目（或销毁热挂载）+ 移出装载清单 + `pnpm remove`；body `{name}`；仅限已安装的包；**当其他已装包声明依赖它时拒绝（409 `has-dependents` + `dependents` 列表）**；同样要求自定义头 |
 | `/dsh-insights/health` | 探活 + 各文档缓存年龄 + 能力标记：`mutations`（`DSH_INSIGHTS_NO_MUTATE=1` 开关 + pnpm 探测）与 `hotMount`（vendored include 插件可导入） |
 
-- **上游**：`https://dsh-insights.com/data/{insights,scenarios,dynamics,compat,enrich}.json`——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。
+- **上游**：`https://dsh-insights.com/data/{insights,scenarios,dynamics,compat,enrich}.json`——首次请求时懒加载，内存缓存 **TTL 6 小时**；拉取失败返回 **502 + JSON error**，且不污染缓存。例外：`/dynamics` 的 dsh dist-tags 以 **5 分钟 TTL** 直连 npm registry 刷新（可用 `DSH_INSIGHTS_NPM_REGISTRY` 覆盖），官方发版当天「最新 release」也能追上；registry 失败时保留快照值。
 - **只读**，无写端点；每个请求都过一道与官方 `/api` 一致的主机信任门（回环 Host 直接信任，其余需要同源 Origin 标记）。**这不是认证层**——与官方 web server 同一姿态（默认绑定 127.0.0.1）。
 - 路由经 `ctx.effect(() => ctx.webServer.register(...))` 注册，插件 fiber 卸载时自动释放。
 
