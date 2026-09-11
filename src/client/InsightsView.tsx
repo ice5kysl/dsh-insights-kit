@@ -1727,8 +1727,36 @@ const drawerStyle: CSSProperties = {
 }
 
 /** The shell.overlay entry: mounted always, visible only while open. */
+
+// shell.overlay 抽屉被 portal 到 body 层,落在设计系统令牌(--dsw-alias-*)的
+// 定义范围之外 —— 亮色回退导致暗色下整块白板。挂载时从应用树里找到定义
+// 令牌的祖先,把用到的令牌值拷到抽屉根元素上,让面板在任何挂载点跟随主题。
+const THEME_TOKENS = [
+  '--dsw-alias-bg-layer-1', '--dsw-alias-bg-layer-2', '--dsw-alias-bg-layer-3',
+  '--dsw-alias-border-l1', '--dsw-alias-border-l2',
+  '--dsw-alias-label-primary', '--dsw-alias-label-secondary',
+  '--dsw-alias-label-tertiary', '--dsw-alias-label-dimmed',
+  '--dsw-alias-interactive-bg-hover', '--dsw-alias-brand-primary',
+  '--dsw-alias-state-error-primary', '--dsw-alias-link',
+] as const
+
+function inheritThemeTokens(root: HTMLElement): void {
+  // 沿 html → body → 首子元素链下潜,找到第一个真正定义了令牌的节点
+  let source: HTMLElement | null = document.documentElement
+  while (source && !getComputedStyle(source).getPropertyValue(THEME_TOKENS[1]).trim()) {
+    source = source.firstElementChild as HTMLElement | null
+  }
+  if (!source) return
+  const computed = getComputedStyle(source)
+  for (const name of THEME_TOKENS) {
+    const value = computed.getPropertyValue(name).trim()
+    if (value) root.style.setProperty(name, value)
+  }
+}
+
 export function InsightsPanel(): JSX.Element | null {
   const [open, setOpen] = useState(false)
+  const drawerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const onToggle = (): void => setOpen((prev) => !prev)
@@ -1743,10 +1771,15 @@ export function InsightsPanel(): JSX.Element | null {
     }
   }, [])
 
+  // 打开时拷贝主题令牌到抽屉根(portal 到 body 层,继承不到应用树上的定义)
+  useEffect(() => {
+    if (open && drawerRef.current) inheritThemeTokens(drawerRef.current)
+  }, [open])
+
   if (!open) return null
   return (
     <div style={backdropStyle} onClick={() => setOpen(false)}>
-      <div style={drawerStyle} onClick={(event) => event.stopPropagation()}>
+      <div ref={drawerRef} style={drawerStyle} onClick={(event) => event.stopPropagation()}>
         <PanelContent onClose={() => setOpen(false)} />
       </div>
     </div>
