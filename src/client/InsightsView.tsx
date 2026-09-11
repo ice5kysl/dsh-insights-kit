@@ -122,7 +122,7 @@ const headerStyle: CSSProperties = {
   alignItems: 'center',
   gap: 8,
   padding: '10px 14px',
-  borderBottom: '1px solid var(--border, #e2e5e9)',
+  borderBottom: '1px solid var(--dsw-alias-border-l2, var(--border, #e2e5e9)',
   flexShrink: 0,
 }
 
@@ -134,49 +134,49 @@ const bodyStyle: CSSProperties = {
 }
 
 const subTabStyle = (active: boolean): CSSProperties => ({
-  border: '1px solid var(--border, #e2e5e9)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #e2e5e9)',
   borderRadius: 6,
   padding: '3px 12px',
   fontSize: 12,
   cursor: 'pointer',
-  background: active ? 'var(--fg, #1f2328)' : 'transparent',
-  color: active ? 'var(--bg, #ffffff)' : 'inherit',
+  background: active ? 'var(--dsw-alias-label-primary, var(--fg, #1f2328)' : 'transparent',
+  color: active ? 'var(--dsw-alias-bg-layer-2, var(--bg, #ffffff)' : 'inherit',
 })
 
 const buttonStyle: CSSProperties = {
-  border: '1px solid var(--border, #d0d7de)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #d0d7de)',
   borderRadius: 6,
   padding: '5px 14px',
   fontSize: 13,
   cursor: 'pointer',
-  background: 'var(--fg, #1f2328)',
-  color: 'var(--bg, #ffffff)',
+  background: 'var(--dsw-alias-label-primary, var(--fg, #1f2328)',
+  color: 'var(--dsw-alias-bg-layer-2, var(--bg, #ffffff)',
 }
 
 const inputStyle: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  border: '1px solid var(--border, #d0d7de)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #d0d7de)',
   borderRadius: 6,
   padding: '5px 10px',
   fontSize: 13,
-  background: 'var(--bg, #ffffff)',
+  background: 'var(--dsw-alias-bg-layer-2, var(--bg, #ffffff)',
   color: 'inherit',
 }
 
 const cardStyle: CSSProperties = {
-  border: '1px solid var(--border, #e2e5e9)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #e2e5e9)',
   borderRadius: 8,
   padding: '12px 14px',
   marginBottom: 12,
 }
 
-const mutedStyle: CSSProperties = { color: 'var(--fg-muted, #6a737d)', fontSize: 12 }
+const mutedStyle: CSSProperties = { color: 'var(--dsw-alias-label-secondary, var(--fg-muted, #6a737d)', fontSize: 12 }
 
 /** Small「已安装 / Installed」marker on scenario rows. */
 const installedPillStyle: CSSProperties = {
   ...mutedStyle,
-  border: '1px solid var(--border, #e2e5e9)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #e2e5e9)',
   borderRadius: 6,
   padding: '0 6px',
   fontSize: 11,
@@ -185,13 +185,13 @@ const installedPillStyle: CSSProperties = {
 
 /** Row-trailing「复制命令」button (copies a terminal command, never runs it). */
 const copyButtonStyle: CSSProperties = {
-  border: '1px solid var(--border, #d0d7de)',
+  border: '1px solid var(--dsw-alias-border-l2, var(--border, #d0d7de)',
   borderRadius: 6,
   padding: '2px 8px',
   fontSize: 11,
   cursor: 'pointer',
   background: 'transparent',
-  color: 'var(--fg-muted, #6a737d)',
+  color: 'var(--dsw-alias-label-secondary, var(--fg-muted, #6a737d)',
   flexShrink: 0,
 }
 
@@ -432,7 +432,7 @@ function DistTags({ tags }: { tags: Record<string, string> | undefined }): JSX.E
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
       {Object.entries(tags).map(([tag, version]) => (
-        <span key={tag} style={{ ...mutedStyle, border: '1px solid var(--border, #e2e5e9)', borderRadius: 6, padding: '2px 8px' }}>
+        <span key={tag} style={{ ...mutedStyle, border: '1px solid var(--dsw-alias-border-l2, var(--border, #e2e5e9)', borderRadius: 6, padding: '2px 8px' }}>
           {tag}: <code>{version}</code>
         </span>
       ))}
@@ -951,7 +951,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
           <div style={{ fontWeight: 700, marginBottom: 6 }}>{L('最近 releases', 'Recent releases')}</div>
           <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
             {releases.slice(0, 5).map((rel) => (
-              <li key={rel.tag} style={{ padding: '4px 0', borderTop: '1px solid var(--border, #eef1f4)' }}>
+              <li key={rel.tag} style={{ padding: '4px 0', borderTop: '1px solid var(--dsw-alias-border-l2, var(--border, #eef1f4)' }}>
                 <code style={{ fontWeight: 700 }}>{rel.name ?? rel.tag}</code>
                 {rel.breaking && (
                   <span style={{ background: '#dc2626', color: '#fff', borderRadius: 4, fontSize: 11, fontWeight: 700, padding: '1px 6px', marginLeft: 6 }}>BREAKING</span>
@@ -1505,7 +1505,7 @@ function HealthCard(props: {
                 <span>{DIM_LABELS[dim] ? L(DIM_LABELS[dim].zh, DIM_LABELS[dim].en) : dim}</span>
                 <span>{value}</span>
               </div>
-              <div style={{ height: 6, borderRadius: 3, background: 'var(--border, #e2e5e9)', overflow: 'hidden' }}>
+              <div style={{ height: 6, borderRadius: 3, background: 'var(--dsw-alias-border-l2, var(--border, #e2e5e9)', overflow: 'hidden' }}>
                 <div style={{ width: `${Math.max(0, Math.min(100, value))}%`, height: '100%', background: value >= 90 ? '#16a34a' : value >= 60 ? '#2563eb' : '#ea580c' }} />
               </div>
             </div>
@@ -1544,7 +1544,7 @@ function HealthCard(props: {
       </div>
 
       {similar && similar.length > 0 && (
-        <div style={{ marginTop: 12, borderTop: '1px solid var(--border, #eef1f4)', paddingTop: 10 }}>
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--dsw-alias-border-l2, var(--border, #eef1f4)', paddingTop: 10 }}>
           <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 12 }}>
             {L('相似推荐', 'Similar picks')}
           </div>
@@ -1718,8 +1718,8 @@ const drawerStyle: CSSProperties = {
   width: 640,
   maxWidth: '100vw',
   height: '100%',
-  background: 'var(--bg, #ffffff)',
-  color: 'var(--fg, #1f2328)',
+  background: 'var(--dsw-alias-bg-layer-2, var(--bg, #ffffff)',
+  color: 'var(--dsw-alias-label-primary, var(--fg, #1f2328)',
   boxShadow: '-24px 0 64px rgba(15, 18, 26, 0.35)',
   display: 'flex',
   flexDirection: 'column',
