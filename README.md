@@ -1,5 +1,5 @@
 # dsh-insights-kit
-[![DSH Insights health](https://dsh-insights.com/badge/ice5kysl/dsh-insights-kit.svg)](https://dsh-insights.com/p/ice5kysl/dsh-insights-kit/)
+[![DSH Insights health](https://dsh-insights.com/badge/ice5kysl/dsh-insights-kit.svg)](https://dsh-insights.com/p/ice5kysl/dsh-insights-kit/?utm_source=dsh-insights-kit&utm_medium=readme)
 
 > GitHub: <https://github.com/ice5kysl/dsh-insights-kit> ｜ MIT License ｜ Target dsh: `@deepseek-ai/dsh` ≥ 0.1.1-rc.2 ｜ English · [简体中文](./README.zh-CN.md)
 

@@ -57,6 +57,7 @@ import {
   observedFailInstallReason,
   scenarioInstallBlocked,
   searchPlugins,
+  tagSiteUrl,
   uninstallPlugin,
   disablePlugin,
   type ClientCompatReport,
@@ -1163,7 +1164,7 @@ function AuditSection(props: { onPick: (fullName: string) => void }): JSX.Elemen
                     </span>
                   )}
                   {low && (
-                    <a href={`${SITE}/p/${owner}/${repo}/`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 12 }}>
+                    <a href={tagSiteUrl(`${SITE}/p/${owner}/${repo}/`)} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 12 }}>
                       {L('同类更优替代 ↗', 'better alternatives ↗')}
                     </a>
                   )}
@@ -1434,7 +1435,7 @@ function HealthCard(props: {
 }): JSX.Element {
   const { card, generatedAt, similar, onPick } = props
   const [owner, repo] = card.full_name.split('/')
-  const pageUrl = `${SITE}/p/${owner}/${repo}/`
+  const pageUrl = tagSiteUrl(`${SITE}/p/${owner}/${repo}/`)
   const dims = Object.entries(card.dimScores)
   const drift = card.npmLatest && card.version && card.npmLatest !== card.version
 
@@ -1858,7 +1859,7 @@ function PanelContent(props: { onClose: () => void }): JSX.Element {
           </button>
         ))}
         <span style={{ flex: 1 }} />
-        <a href={SITE} target="_blank" rel="noreferrer" style={{ ...mutedStyle, color: '#2563eb' }}>
+        <a href={tagSiteUrl(SITE)} target="_blank" rel="noreferrer" style={{ ...mutedStyle, color: '#2563eb' }}>
           dsh-insights.com ↗
         </a>
         <button

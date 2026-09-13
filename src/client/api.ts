@@ -130,6 +130,20 @@ export function observedFailInstallReason(observed?: ScenarioObserved, fullName?
   }
 }
 
+/**
+ * UTM tag appended to in-shell jumps into dsh-insights.com, so arrivals from
+ * this plugin are distinguishable from direct/self traffic in the site's
+ * Umami. Display-only strings — the `page` pointer above is rendered inside a
+ * tooltip — deliberately stay untagged; only real href targets get it.
+ */
+export const SITE_UTM = 'utm_source=dsh-insights-kit&utm_medium=dsh-plugin'
+
+/** Append SITE_UTM to a dsh-insights.com link (idempotent, query-aware). */
+export function tagSiteUrl(url: string): string {
+  if (url.includes('utm_source=')) return url
+  return `${url}${url.includes('?') ? '&' : '?'}${SITE_UTM}`
+}
+
 export interface ReleaseRow {
   tag: string
   name?: string
